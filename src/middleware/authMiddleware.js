@@ -25,7 +25,6 @@ export const authenticateUser = async (req, res, next) => {
         message: "Invalid or expired token",
       });
     }
-
     req.user = user;
     req.accessToken = token;
 

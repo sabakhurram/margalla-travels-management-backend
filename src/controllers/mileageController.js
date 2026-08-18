@@ -460,3 +460,271 @@ export const createMileageEntry = async (req, res) => {
     });
   }
 };
+/*
+====================================================
+GET DRIVER DASHBOARD SUMMARY
+====================================================
+
+Returns:
+
+- Logged-in driver
+- Assigned vehicle
+- Current month's mileage limit
+- KM used this month
+- Remaining KM
+- Usage percentage
+*/
+
+export const getDriverDashboard = async (req, res) => {
+  try {
+    const userSupabase = createUserSupabaseClient(
+      req.accessToken
+    );
+console.log("Authenticated user ID:", req.user.id);
+    /*
+    --------------------------------------------
+    Find logged-in driver
+    --------------------------------------------
+    */
+
+    const { data: driver, error: driverError } =
+      await userSupabase
+        .from("drivers")
+        .select(`
+          id,
+          name,
+          phone,
+          status
+        `)
+        .eq("user_id", req.user.id)
+        .maybeSingle();
+    
+    if (driverError) {
+      console.error(
+        "Error finding driver:",
+        driverError
+      );
+
+      return res.status(500).json({
+        message: "Failed to find driver",
+      });
+    }
+
+    if (!driver) {
+      return res.status(404).json({
+        message: "Driver profile not found",
+      });
+    }
+
+    /*
+    --------------------------------------------
+    Find assigned vehicle + category
+    --------------------------------------------
+    */
+
+    const { data: vehicle, error: vehicleError } =
+      await userSupabase
+        .from("vehicles")
+        .select(`
+          id,
+          registration_number,
+          model,
+          status,
+          category_id,
+
+          categories (
+            id,
+            name
+          )
+        `)
+        .eq("assigned_driver_id", driver.id)
+        .maybeSingle();
+
+    if (vehicleError) {
+      console.error(
+        "Error finding assigned vehicle:",
+        vehicleError
+      );
+
+      return res.status(500).json({
+        message: "Failed to fetch assigned vehicle",
+      });
+    }
+
+    /*
+    --------------------------------------------
+    If no vehicle is assigned
+    --------------------------------------------
+    */
+
+    if (!vehicle) {
+      return res.status(200).json({
+        driver,
+        vehicle: null,
+        monthlyMileage: null,
+      });
+    }
+
+    /*
+    --------------------------------------------
+    Get current year and month
+    --------------------------------------------
+    */
+
+    const today = new Date();
+
+    const year = today.getFullYear();
+
+    // JavaScript months are 0–11
+    // Database month should be 1–12
+    const month = today.getMonth() + 1;
+
+    /*
+    --------------------------------------------
+    Get monthly limit for vehicle category
+    --------------------------------------------
+    */
+
+    const {
+      data: monthlyLimit,
+      error: limitError,
+    } = await userSupabase
+      .from("category_monthly_limit")
+      .select(`
+        id,
+        year,
+        month,
+        km_limit
+      `)
+      .eq("category_id", vehicle.category_id)
+      .eq("year", year)
+      .eq("month", month)
+      .maybeSingle();
+
+    if (limitError) {
+      console.error(
+        "Error fetching monthly limit:",
+        limitError
+      );
+
+      return res.status(500).json({
+        message: "Failed to fetch monthly mileage limit",
+      });
+    }
+
+    /*
+    --------------------------------------------
+    Calculate start and end of current month
+    --------------------------------------------
+    */
+
+    const startOfMonth =
+      `${year}-${String(month).padStart(2, "0")}-01`;
+
+    const lastDay = new Date(
+      year,
+      month,
+      0
+    ).getDate();
+
+    const endOfMonth =
+      `${year}-${String(month).padStart(
+        2,
+        "0"
+      )}-${String(lastDay).padStart(2, "0")}`;
+
+    /*
+    --------------------------------------------
+    Get this month's mileage entries
+    for the assigned vehicle
+    --------------------------------------------
+    */
+
+    const {
+      data: mileageEntries,
+      error: mileageError,
+    } = await userSupabase
+      .from("mileage_entries")
+      .select(`
+        km_covered
+      `)
+      .eq("vehicle_id", vehicle.id)
+      .gte("entry_date", startOfMonth)
+      .lte("entry_date", endOfMonth);
+
+    if (mileageError) {
+      console.error(
+        "Error fetching monthly mileage:",
+        mileageError
+      );
+
+      return res.status(500).json({
+        message:
+          "Failed to calculate monthly mileage",
+      });
+    }
+
+    /*
+    --------------------------------------------
+    Calculate used mileage
+    --------------------------------------------
+    */
+
+    const used = (mileageEntries || []).reduce(
+      (total, entry) =>
+        total + Number(entry.km_covered || 0),
+      0
+    );
+
+    /*
+    --------------------------------------------
+    Monthly limit
+    --------------------------------------------
+    */
+
+    const limit = monthlyLimit
+      ? Number(monthlyLimit.km_limit)
+      : 0;
+
+    const remaining = Math.max(
+      limit - used,
+      0
+    );
+
+    const percentage =
+      limit > 0
+        ? Number(
+            ((used / limit) * 100).toFixed(2)
+          )
+        : 0;
+
+    /*
+    --------------------------------------------
+    Return dashboard data
+    --------------------------------------------
+    */
+
+    return res.status(200).json({
+      driver,
+      vehicle,
+      monthlyMileage: {
+        year,
+        month,
+        limit,
+        used,
+        remaining,
+        percentage,
+      },
+    });
+  } catch (error) {
+    console.error(
+      "Get driver dashboard error:",
+      error
+    );
+
+    return res.status(500).json({
+      message:
+        "Server error while fetching driver dashboard",
+    });
+  }
+};
