@@ -5,6 +5,7 @@ import {
   getMyVehicle,
   getDriverDashboard,
   createMileageEntry,
+    getMyMileageHistory,
 } from "../controllers/mileageController.js";
 import { authenticateUser } from "../middleware/authMiddleware.js";
 
@@ -39,5 +40,11 @@ router.post(
   authenticateUser,
   createMileageEntry
 );
+// Get logged-in driver's mileage history
 
+router.get(
+  "/my-history",
+  authenticateUser,
+  getMyMileageHistory
+);
 export default router;

@@ -81,7 +81,103 @@ drivers.id
     ↓
 vehicles.assigned_driver_id
 */
+/*
+====================================================
+GET LOGGED-IN DRIVER'S MILEAGE HISTORY
+====================================================
+*/
 
+export const getMyMileageHistory = async (req, res) => {
+  try {
+    const userSupabase = createUserSupabaseClient(
+      req.accessToken
+    );
+
+    /*
+    --------------------------------------------
+    Find logged-in driver
+    --------------------------------------------
+    */
+
+    const {
+      data: driver,
+      error: driverError,
+    } = await userSupabase
+      .from("drivers")
+      .select("id, name")
+      .eq("user_id", req.user.id)
+      .maybeSingle();
+
+    if (driverError) {
+      console.error(
+        "Error finding driver:",
+        driverError
+      );
+
+      return res.status(500).json({
+        message: "Failed to find driver",
+      });
+    }
+
+    if (!driver) {
+      return res.status(404).json({
+        message: "Driver profile not found",
+      });
+    }
+
+    /*
+    --------------------------------------------
+    Get this driver's mileage history
+    --------------------------------------------
+    */
+
+    const {
+      data: mileage,
+      error: mileageError,
+    } = await userSupabase
+      .from("mileage_entries")
+      .select(`
+        id,
+        entry_date,
+        starting_mileage,
+        ending_mileage,
+        km_covered,
+        trip_type,
+        remarks,
+        created_at
+      `)
+      .eq("driver_id", driver.id)
+      .order("entry_date", { ascending: false })
+      .order("created_at", { ascending: false });
+
+    if (mileageError) {
+      console.error(
+        "Error fetching driver mileage history:",
+        mileageError
+      );
+
+      return res.status(500).json({
+        message:
+          "Failed to fetch mileage history",
+      });
+    }
+
+    return res.status(200).json({
+      mileage: mileage || [],
+    });
+
+  } catch (error) {
+    console.error(
+      "Get driver mileage history error:",
+      error
+    );
+
+    return res.status(500).json({
+      message:
+        "Server error while fetching mileage history",
+    });
+  }
+};
 export const getMyVehicle = async (req, res) => {
   try {
     const userSupabase = createUserSupabaseClient(
@@ -276,8 +372,8 @@ export const createMileageEntry = async (req, res) => {
     --------------------------------------------
     */
 
-    const kmCovered =
-      endMileage - startMileage;
+    // const kmCovered =
+    //   endMileage - startMileage;
 
     const userSupabase =
       createUserSupabaseClient(
@@ -379,7 +475,92 @@ export const createMileageEntry = async (req, res) => {
           "Your assigned vehicle is not active",
       });
     }
+/*
+--------------------------------------------
+Check previous mileage entry
+--------------------------------------------
+*/
 
+const {
+  data: previousEntry,
+  error: previousEntryError,
+} = await userSupabase
+  .from("mileage_entries")
+  .select(`
+    id,
+    entry_date,
+    starting_mileage,
+    ending_mileage
+  `)
+  .eq("vehicle_id", vehicle.id)
+  .order("entry_date", { ascending: false })
+  .order("created_at", { ascending: false })
+  .limit(1)
+  .maybeSingle();
+
+if (previousEntryError) {
+  console.error(
+    "Error fetching previous mileage entry:",
+    previousEntryError
+  );
+
+  return res.status(500).json({
+    message:
+      "Failed to validate previous mileage",
+  });
+}
+
+/*
+--------------------------------------------
+Prevent duplicate entry for same date
+--------------------------------------------
+*/
+
+const {
+  data: sameDayEntry,
+  error: sameDayError,
+} = await userSupabase
+  .from("mileage_entries")
+  .select("id")
+  .eq("vehicle_id", vehicle.id)
+  .eq("entry_date", entry_date)
+  .maybeSingle();
+
+if (sameDayError) {
+  console.error(
+    "Error checking same-day mileage:",
+    sameDayError
+  );
+
+  return res.status(500).json({
+    message:
+      "Failed to validate mileage date",
+  });
+}
+
+if (sameDayEntry) {
+  return res.status(400).json({
+    message:
+      "Mileage has already been submitted for this date",
+  });
+}
+
+/*
+--------------------------------------------
+Starting mileage must not be lower
+than previous ending mileage
+--------------------------------------------
+*/
+
+if (
+  previousEntry &&
+  startMileage < Number(previousEntry.ending_mileage)
+) {
+  return res.status(400).json({
+    message:
+      `Starting mileage cannot be less than the previous ending mileage (${previousEntry.ending_mileage} KM)`,
+  });
+}
     /*
     --------------------------------------------
     Insert mileage entry
@@ -396,7 +577,7 @@ export const createMileageEntry = async (req, res) => {
             entry_date,
             starting_mileage: startMileage,
             ending_mileage: endMileage,
-            km_covered: kmCovered,
+            // km_covered: kmCovered,
             trip_type:
               trip_type.trim(),
             remarks:
@@ -539,6 +720,7 @@ console.log("Authenticated user ID:", req.user.id);
         `)
         .eq("assigned_driver_id", driver.id)
         .maybeSingle();
+        
 
     if (vehicleError) {
       console.error(
@@ -589,12 +771,12 @@ console.log("Authenticated user ID:", req.user.id);
       data: monthlyLimit,
       error: limitError,
     } = await userSupabase
-      .from("category_monthly_limit")
+      .from("category_monthly_limits")
       .select(`
         id,
         year,
         month,
-        km_limit
+       limit_km
       `)
       .eq("category_id", vehicle.category_id)
       .eq("year", year)
@@ -611,7 +793,13 @@ console.log("Authenticated user ID:", req.user.id);
         message: "Failed to fetch monthly mileage limit",
       });
     }
-
+console.log("Monthly limit query result:", {
+  monthlyLimit,
+  limitError,
+  categoryId: vehicle.category_id,
+  year,
+  month,
+});
     /*
     --------------------------------------------
     Calculate start and end of current month
@@ -640,17 +828,24 @@ console.log("Authenticated user ID:", req.user.id);
     --------------------------------------------
     */
 
-    const {
-      data: mileageEntries,
-      error: mileageError,
-    } = await userSupabase
-      .from("mileage_entries")
-      .select(`
-        km_covered
-      `)
-      .eq("vehicle_id", vehicle.id)
-      .gte("entry_date", startOfMonth)
-      .lte("entry_date", endOfMonth);
+   const {
+  data: mileageEntries,
+  error: mileageError,
+} = await userSupabase
+  .from("mileage_entries")
+  .select(`
+    id,
+    entry_date,
+    starting_mileage,
+    ending_mileage,
+    km_covered,
+    trip_type,
+    remarks
+  `)
+  .eq("vehicle_id", vehicle.id)
+  .gte("entry_date", startOfMonth)
+  .lte("entry_date", endOfMonth)
+  .order("entry_date", { ascending: false });
 
     if (mileageError) {
       console.error(
@@ -663,7 +858,42 @@ console.log("Authenticated user ID:", req.user.id);
           "Failed to calculate monthly mileage",
       });
     }
+    const {
+  data: latestMileageEntry,
+  error: latestMileageError,
+} = await userSupabase
+  .from("mileage_entries")
+  .select(`
+    id,
+    entry_date,
+    starting_mileage,
+    ending_mileage
+  `)
+  .eq("vehicle_id", vehicle.id)
+  .order("entry_date", { ascending: false })
+  .order("created_at", { ascending: false })
+  .limit(1)
+  .maybeSingle();
 
+if (latestMileageError) {
+  console.error(
+    "Error fetching latest mileage entry:",
+    latestMileageError
+  );
+
+  return res.status(500).json({
+    message:
+      "Failed to fetch latest mileage entry",
+  });
+}
+
+const startingOdometer =
+  latestMileageEntry
+    ? Number(latestMileageEntry.ending_mileage)
+    : null;
+
+    console.log("Starting odometer:", startingOdometer);
+console.log("Latest mileage entry:", latestMileageEntry);
     /*
     --------------------------------------------
     Calculate used mileage
@@ -683,7 +913,7 @@ console.log("Authenticated user ID:", req.user.id);
     */
 
     const limit = monthlyLimit
-      ? Number(monthlyLimit.km_limit)
+      ? Number(monthlyLimit.limit_km)
       : 0;
 
     const remaining = Math.max(
@@ -703,19 +933,19 @@ console.log("Authenticated user ID:", req.user.id);
     Return dashboard data
     --------------------------------------------
     */
-
-    return res.status(200).json({
-      driver,
-      vehicle,
-      monthlyMileage: {
-        year,
-        month,
-        limit,
-        used,
-        remaining,
-        percentage,
-      },
-    });
+return res.status(200).json({
+  driver,
+  vehicle,
+  monthlyMileage: {
+    year,
+    month,
+    limit,
+    used,
+    remaining,
+    percentage,
+  },
+  startingOdometer,
+});
   } catch (error) {
     console.error(
       "Get driver dashboard error:",

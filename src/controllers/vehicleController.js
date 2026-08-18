@@ -43,6 +43,7 @@ export const getVehicles = async (req, res) => {
       message: "Server error while fetching vehicles",
     });
   }
+  
 };
 export const createVehicle = async (req, res) => {
   try {
