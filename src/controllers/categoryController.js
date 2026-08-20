@@ -1,5 +1,5 @@
 import { createUserSupabaseClient } from "../config/supabaseUser.js";
-
+import { createAuditLog } from "../utils/auditLogger.js";
 export const getCategories = async (req, res) => {
   try {
     const userSupabase = createUserSupabaseClient(req.accessToken);
@@ -87,11 +87,46 @@ export const createCategory = async (req, res) => {
         message: "Failed to create category",
       });
     }
+    await createAuditLog({
+  supabase: userSupabase,
+  userId: req.user.id,
+  action: "CREATE",
+  tableName: "categories",
+  recordId: data.id,
+  newValue: data,
+});
 
     res.status(201).json({
       message: "Category created successfully",
       category: data,
     });
+    if (error) {
+  console.error("Error creating category:", error);
+
+  return res.status(500).json({
+    message: "Failed to create category",
+  });
+}
+
+/* ========================================
+   CREATE AUDIT LOG
+======================================== */
+
+await createAuditLog({
+  userSupabase,
+  userId: req.user.id,
+  action: "CREATE",
+  tableName: "categories",
+  recordId: data.id,
+  oldValue: null,
+  newValue: data,
+});
+
+res.status(201).json({
+  message: "Category created successfully",
+  category: data,
+});
+
   } catch (error) {
     console.error("Create category error:", error);
 
@@ -100,6 +135,7 @@ export const createCategory = async (req, res) => {
     });
   }
 };
+
 export const updateCategory = async (req, res) => {
   try {
     const { id } = req.params;
@@ -117,16 +153,67 @@ export const updateCategory = async (req, res) => {
       });
     }
 
-    const userSupabase = createUserSupabaseClient(req.accessToken);
+    /*
+    --------------------------------------------
+    Create authenticated Supabase client
+    --------------------------------------------
+    */
 
-    // Check if another category already has this name
-    const { data: existingCategory, error: existingError } =
-      await userSupabase
-        .from("categories")
-        .select("id, name")
-        .ilike("name", name.trim())
-        .neq("id", id)
-        .maybeSingle();
+    const userSupabase = createUserSupabaseClient(
+      req.accessToken
+    );
+
+    /*
+    --------------------------------------------
+    Get existing category
+    --------------------------------------------
+    */
+
+    const {
+      data: oldCategory,
+      error: oldCategoryError,
+    } = await userSupabase
+      .from("categories")
+      .select(`
+        id,
+        name,
+        created_at
+      `)
+      .eq("id", id)
+      .maybeSingle();
+
+    if (oldCategoryError) {
+      console.error(
+        "Error fetching existing category:",
+        oldCategoryError
+      );
+
+      return res.status(500).json({
+        message: "Failed to fetch category",
+      });
+    }
+
+    if (!oldCategory) {
+      return res.status(404).json({
+        message: "Category not found",
+      });
+    }
+
+    /*
+    --------------------------------------------
+    Check duplicate category name
+    --------------------------------------------
+    */
+
+    const {
+      data: existingCategory,
+      error: existingError,
+    } = await userSupabase
+      .from("categories")
+      .select("id, name")
+      .ilike("name", name.trim())
+      .neq("id", id)
+      .maybeSingle();
 
     if (existingError) {
       console.error(
@@ -145,8 +232,16 @@ export const updateCategory = async (req, res) => {
       });
     }
 
-    // Update category
-    const { data, error } = await userSupabase
+    /*
+    --------------------------------------------
+    Update category
+    --------------------------------------------
+    */
+
+    const {
+      data,
+      error,
+    } = await userSupabase
       .from("categories")
       .update({
         name: name.trim(),
@@ -160,25 +255,56 @@ export const updateCategory = async (req, res) => {
       .single();
 
     if (error) {
-      console.error("Error updating category:", error);
+      console.error(
+        "Error updating category:",
+        error
+      );
 
       return res.status(500).json({
         message: "Failed to update category",
       });
     }
 
-    res.status(200).json({
+    /*
+    --------------------------------------------
+    CREATE AUDIT LOG
+    --------------------------------------------
+    */
+
+    await createAuditLog({
+      supabase: userSupabase,
+      userId: req.user.id,
+      action: "UPDATE",
+      tableName: "categories",
+      recordId: id,
+      oldValue: oldCategory,
+      newValue: data,
+    });
+
+    /*
+    --------------------------------------------
+    Response
+    --------------------------------------------
+    */
+
+    return res.status(200).json({
       message: "Category updated successfully",
       category: data,
     });
-  } catch (error) {
-    console.error("Update category error:", error);
 
-    res.status(500).json({
-      message: "Server error while updating category",
+  } catch (error) {
+    console.error(
+      "Update category error:",
+      error
+    );
+
+    return res.status(500).json({
+      message:
+        "Server error while updating category",
     });
   }
 };
+
 export const deleteCategory = async (req, res) => {
   try {
     const { id } = req.params;
@@ -190,6 +316,42 @@ export const deleteCategory = async (req, res) => {
     }
 
     const userSupabase = createUserSupabaseClient(req.accessToken);
+    const { data: oldCategory, error: oldCategoryError } =
+  await userSupabase
+    .from("categories")
+    .select(`
+      id,
+      name,
+      created_at
+    `)
+    .eq("id", id)
+    .maybeSingle();
+
+if (oldCategoryError) {
+  console.error(
+    "Error fetching category:",
+    oldCategoryError
+  );
+
+  return res.status(500).json({
+    message: "Failed to fetch category",
+  });
+}
+
+if (!oldCategory) {
+  return res.status(404).json({
+    message: "Category not found",
+  });
+}
+await createAuditLog({
+  userSupabase,
+  userId: req.user.id,
+  action: "DELETE",
+  tableName: "categories",
+  recordId: oldCategory.id,
+  oldValue: oldCategory,
+  newValue: null,
+});
 
     const { data, error } = await userSupabase
       .from("categories")

@@ -1,4 +1,5 @@
 import { createUserSupabaseClient } from "../config/supabaseUser.js";
+import { createAuditLog } from "../utils/auditLogger.js";
 
 export const getVehicles = async (req, res) => {
   try {
@@ -143,8 +144,19 @@ export const createVehicle = async (req, res) => {
         message: "Failed to create vehicle",
       });
     }
+    console.log("AUDIT USER:", req.user);
+console.log("AUDIT USER ID:", req.user?.id);
 
-    res.status(201).json({
+await createAuditLog({
+  supabase: userSupabase,
+  userId: req.user.id,
+  action: "CREATE",
+  tableName: "vehicles",
+  recordId: data.id,
+  oldValue: null,
+  newValue: data,
+});
+res.status(201).json({
       message: "Vehicle created successfully",
       vehicle: data,
     });
@@ -199,9 +211,41 @@ export const updateVehicle = async (req, res) => {
     }
 
     const userSupabase = createUserSupabaseClient(
+      
       req.accessToken
     );
+const {
+  data: oldVehicle,
+  error: oldVehicleError,
+} = await userSupabase
+  .from("vehicles")
+  .select(`
+    id,
+    registration_number,
+    model,
+    category_id,
+    assigned_driver_id,
+    status
+  `)
+  .eq("id", id)
+  .maybeSingle();
 
+if (oldVehicleError) {
+  console.error(
+    "Error fetching vehicle before update:",
+    oldVehicleError
+  );
+
+  return res.status(500).json({
+    message: "Failed to fetch vehicle",
+  });
+}
+
+if (!oldVehicle) {
+  return res.status(404).json({
+    message: "Vehicle not found",
+  });
+}
     // Check if another vehicle already uses this
     // registration number
     const { data: existingVehicle, error: existingError } =
@@ -262,7 +306,19 @@ export const updateVehicle = async (req, res) => {
         message: "Failed to update vehicle",
       });
     }
+await createAuditLog(
+  
+  {
+  supabase: userSupabase,
+  userId: req.user.id,
+  action: "UPDATE",
+  tableName: "vehicles",
+  recordId: data.id,
+  oldValue: null,
+  newValue: data,
 
+  }
+);
     res.status(200).json({
       message: "Vehicle updated successfully",
       vehicle: data,
@@ -288,7 +344,38 @@ export const deleteVehicle = async (req, res) => {
     const userSupabase = createUserSupabaseClient(
       req.accessToken
     );
+const {
+  data: vehicleToDelete,
+  error: fetchError,
+} = await userSupabase
+  .from("vehicles")
+  .select(`
+    id,
+    registration_number,
+    model,
+    category_id,
+    assigned_driver_id,
+    status
+  `)
+  .eq("id", id)
+  .maybeSingle();
 
+if (fetchError) {
+  console.error(
+    "Error fetching vehicle before deletion:",
+    fetchError
+  );
+
+  return res.status(500).json({
+    message: "Failed to fetch vehicle",
+  });
+}
+
+if (!vehicleToDelete) {
+  return res.status(404).json({
+    message: "Vehicle not found",
+  });
+}
     const { data, error } = await userSupabase
       .from("vehicles")
       .delete()
@@ -310,6 +397,15 @@ export const deleteVehicle = async (req, res) => {
       });
     }
 
+await createAuditLog({
+  supabase: userSupabase,
+  userId: req.user.id,
+  action: "DELETE",
+  tableName: "vehicles",
+  recordId: id,
+  oldValue: vehicleToDelete,
+  newValue: null,
+});
     res.status(200).json({
       message: "Vehicle deleted successfully",
       vehicleId: data.id,

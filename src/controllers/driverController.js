@@ -1,6 +1,6 @@
 import { createUserSupabaseClient } from "../config/supabaseUser.js";
 import { supabaseAdmin } from "../config/supabaseAdmin.js";
-
+import { createAuditLog } from "../utils/auditLogger.js";
 export const getDrivers = async (req, res) => {
   try {
     const userSupabase = createUserSupabaseClient(req.accessToken);
@@ -44,6 +44,7 @@ export const getDrivers = async (req, res) => {
 
 
 export const createDriver = async (req, res) => {
+ 
   let createdAuthUserId = null;
 
   try {
@@ -178,7 +179,31 @@ export const createDriver = async (req, res) => {
     // -----------------------------
     // Success
     // -----------------------------
+    if (error) {
+  console.error(
+    "Error creating driver record:",
+    error
+  );
 
+  await supabaseAdmin.auth.admin.deleteUser(
+    createdAuthUserId
+  );
+
+  createdAuthUserId = null;
+
+  return res.status(500).json({
+    message: "Failed to create driver",
+  });
+}
+await createAuditLog({
+  supabase: userSupabase,
+  userId: req.user.id,
+  action: "CREATE",
+  tableName: "drivers",
+  recordId: data.id,
+  oldValue: null,
+  newValue: data,
+});
     return res.status(201).json({
       message:
         "Driver created successfully. An invitation email has been sent.",
@@ -248,7 +273,38 @@ export const updateDriver = async (req, res) => {
     const userSupabase = createUserSupabaseClient(
       req.accessToken
     );
+const {
+  data: oldDriver,
+  error: fetchError,
+} = await userSupabase
+  .from("drivers")
+  .select(`
+    id,
+    user_id,
+    name,
+    phone,
+    status,
+    created_at
+  `)
+  .eq("id", id)
+  .maybeSingle();
 
+if (fetchError) {
+  console.error(
+    "Error fetching driver before update:",
+    fetchError
+  );
+
+  return res.status(500).json({
+    message: "Failed to fetch driver",
+  });
+}
+
+if (!oldDriver) {
+  return res.status(404).json({
+    message: "Driver not found",
+  });
+}
     const { data, error } = await userSupabase
       .from("drivers")
       .update({
@@ -279,7 +335,15 @@ export const updateDriver = async (req, res) => {
         message: "Failed to update driver",
       });
     }
-
+await createAuditLog({
+  supabase: userSupabase,
+  userId: req.user.id,
+  action: "UPDATE",
+  tableName: "drivers",
+  recordId: id,
+  oldValue: oldDriver,
+  newValue: data,
+});
     res.status(200).json({
       message: "Driver updated successfully",
       driver: data,
@@ -334,6 +398,41 @@ export const deleteDriver = async (req, res) => {
       });
     }
 
+    // Get the driver before deleting
+    const {
+      data: oldDriver,
+      error: fetchError,
+    } = await userSupabase
+      .from("drivers")
+      .select(`
+        id,
+        user_id,
+        name,
+        phone,
+        status,
+        created_at
+      `)
+      .eq("id", id)
+      .maybeSingle();
+
+    if (fetchError) {
+      console.error(
+        "Error fetching driver before delete:",
+        fetchError
+      );
+
+      return res.status(500).json({
+        message: "Failed to fetch driver",
+      });
+    }
+
+    if (!oldDriver) {
+      return res.status(404).json({
+        message: "Driver not found",
+      });
+    }
+
+    // Delete the driver
     const { data, error } = await userSupabase
       .from("drivers")
       .delete()
@@ -349,16 +448,22 @@ export const deleteDriver = async (req, res) => {
       });
     }
 
-    if (!data) {
-      return res.status(404).json({
-        message: "Driver not found",
-      });
-    }
+    // Create audit log
+    await createAuditLog({
+      supabase: userSupabase,
+      userId: req.user.id,
+      action: "DELETE",
+      tableName: "drivers",
+      recordId: id,
+      oldValue: oldDriver,
+      newValue: null,
+    });
 
     res.status(200).json({
       message: "Driver deleted successfully",
       driverId: data.id,
     });
+
   } catch (error) {
     console.error("Delete driver error:", error);
 
@@ -366,4 +471,5 @@ export const deleteDriver = async (req, res) => {
       message: "Server error while deleting driver",
     });
   }
-};
+}
+

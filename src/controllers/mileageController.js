@@ -1,6 +1,6 @@
 import { createUserSupabaseClient } from "../config/supabaseUser.js";
 
-
+import { createAuditLog } from "../utils/auditLogger.js";
 export const getMileageEntries = async (req, res) => {
   try {
     const userSupabase = createUserSupabaseClient(
@@ -47,10 +47,193 @@ export const getMileageEntries = async (req, res) => {
         message: "Failed to fetch mileage entries",
       });
     }
+/*
+====================================================
+CALCULATE MONTHLY STATUS FOR EACH VEHICLE
+====================================================
+*/
 
-    return res.status(200).json({
-      mileage: data || [],
+const today = new Date();
+
+const year = today.getFullYear();
+const month = today.getMonth() + 1;
+
+// Get unique vehicle IDs
+const vehicleIds = [
+  ...new Set(
+    (data || []).map((entry) => entry.vehicle_id)
+  ),
+];
+
+const monthlyStatusMap = {};
+const latestEntryMap = {};
+
+for (const vehicleId of vehicleIds) {
+
+  /*
+  --------------------------------------------
+  Get vehicle category
+  --------------------------------------------
+  */
+
+  const {
+    data: vehicle,
+    error: vehicleError,
+  } = await userSupabase
+    .from("vehicles")
+    .select("id, category_id")
+    .eq("id", vehicleId)
+    .maybeSingle();
+
+  if (vehicleError) {
+    console.error(
+      "Error fetching vehicle category:",
+      vehicleError
+    );
+
+    return res.status(500).json({
+      message:
+        "Failed to fetch vehicle category",
     });
+  }
+
+  if (!vehicle) {
+    continue;
+  }
+
+  /*
+  --------------------------------------------
+  Get monthly category limit
+  --------------------------------------------
+  */
+
+  const {
+    data: monthlyLimit,
+    error: limitError,
+  } = await userSupabase
+    .from("category_monthly_limits")
+    .select("limit_km")
+    .eq("category_id", vehicle.category_id)
+    .eq("year", year)
+    .eq("month", month)
+    .maybeSingle();
+
+  if (limitError) {
+    console.error(
+      "Error fetching monthly limit:",
+      limitError
+    );
+
+    return res.status(500).json({
+      message:
+        "Failed to fetch monthly mileage limit",
+    });
+  }
+
+  /*
+  --------------------------------------------
+  Calculate current month's used KM
+  --------------------------------------------
+  */
+
+  const startOfMonth =
+    `${year}-${String(month).padStart(2, "0")}-01`;
+
+  const lastDay = new Date(
+    year,
+    month,
+    0
+  ).getDate();
+
+  const endOfMonth =
+    `${year}-${String(month).padStart(2, "0")}-${String(lastDay).padStart(2, "0")}`;
+
+  const {
+    data: vehicleMileage,
+    error: mileageError,
+  } = await userSupabase
+    .from("mileage_entries")
+    .select("km_covered")
+    .eq("vehicle_id", vehicleId)
+    .gte("entry_date", startOfMonth)
+    .lte("entry_date", endOfMonth);
+
+  if (mileageError) {
+    console.error(
+      "Error calculating vehicle mileage:",
+      mileageError
+    );
+
+    return res.status(500).json({
+      message:
+        "Failed to calculate vehicle mileage",
+    });
+  }
+
+  const used = (vehicleMileage || []).reduce(
+    (total, entry) =>
+      total + Number(entry.km_covered || 0),
+    0
+  );
+
+  const limit = monthlyLimit
+    ? Number(monthlyLimit.limit_km)
+    : 0;
+
+  const remaining = Math.max(
+    limit - used,
+    0
+  );
+
+  const overLimit = Math.max(
+    used - limit,
+    0
+  );
+
+  const percentage =
+    limit > 0
+      ? Number(
+          ((used / limit) * 100).toFixed(2)
+        )
+      : 0;
+
+  monthlyStatusMap[vehicleId] = {
+    used,
+    limit,
+    remaining,
+    overLimit,
+    percentage,
+  };
+}
+
+/*
+====================================================
+IDENTIFY LATEST ENTRY FOR EACH VEHICLE
+====================================================
+*/
+
+(data || []).forEach((entry) => {
+  if (!latestEntryMap[entry.vehicle_id]) {
+    latestEntryMap[entry.vehicle_id] = entry.id;
+  }
+});
+return res.status(200).json({
+  mileage: (data || []).map((entry) => ({
+    ...entry,
+
+    monthlyStatus:
+      monthlyStatusMap[entry.vehicle_id] || {
+        used: 0,
+        limit: 0,
+        remaining: 0,
+        overLimit: 0,
+        percentage: 0,
+      },
+
+    isLatestEntry:
+      latestEntryMap[entry.vehicle_id] === entry.id,
+  })),
+});
   } catch (error) {
     console.error(
       "Get mileage entries error:",
@@ -623,7 +806,15 @@ if (
           "Failed to create mileage entry",
       });
     }
-
+await createAuditLog({
+  supabase: userSupabase,
+  userId: req.user.id,
+  action: "CREATE",
+  tableName: "mileage_entries",
+  recordId: data.id,
+  oldValue: null,
+  newValue: data,
+});
     return res.status(201).json({
       message:
         "Mileage entry created successfully",
@@ -641,6 +832,8 @@ if (
     });
   }
 };
+
+
 /*
 ====================================================
 GET DRIVER DASHBOARD SUMMARY
