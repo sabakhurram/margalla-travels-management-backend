@@ -5,7 +5,8 @@ import {
   getMyVehicle,
   getDriverDashboard,
   createMileageEntry,
-    getMyMileageHistory,
+  getMyMileageHistory,
+  getMileageMonitoring,
 } from "../controllers/mileageController.js";
 import { authenticateUser } from "../middleware/authMiddleware.js";
 
@@ -17,6 +18,13 @@ router.get(
   "/my-dashboard",
   authenticateUser,
   getDriverDashboard
+);
+// Get mileage monitoring for all vehicles
+
+router.get(
+  "/monitoring",
+  authenticateUser,
+  getMileageMonitoring
 );
 // Get mileage entries
 router.get(

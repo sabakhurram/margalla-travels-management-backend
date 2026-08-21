@@ -247,7 +247,675 @@ return res.status(200).json({
   }
 };
 
+/*
+====================================================
+GET MILEAGE MONITORING
+====================================================
 
+Returns one row per vehicle with:
+
+- Vehicle
+- Driver
+- Today's KM
+- Daily Expected
+- Today's Difference
+- Monthly Actual
+- Monthly Expected
+- Monthly Limit
+- Over / Under Expected
+- Status
+*/
+
+export const getMileageMonitoring = async (req, res) => {
+  try {
+    const userSupabase = createUserSupabaseClient(
+      req.accessToken
+    );
+
+    /*
+    ====================================================
+    GET FILTER
+    ====================================================
+
+    Supported:
+
+    ?filter=today
+
+    ?filter=month
+
+    ?filter=date&date=2026-08-15
+    */
+
+    const {
+      filter = "today",
+      date,
+    } = req.query;
+
+    /*
+    ====================================================
+    DETERMINE SELECTED DATE
+    ====================================================
+    */
+
+    const now = new Date();
+
+    let selectedDate;
+
+    if (filter === "date") {
+      if (!date) {
+        return res.status(400).json({
+          message:
+            "A date is required when using the date filter",
+        });
+      }
+
+      /*
+      Validate YYYY-MM-DD
+      */
+
+      const datePattern =
+        /^\d{4}-\d{2}-\d{2}$/;
+
+      if (!datePattern.test(date)) {
+        return res.status(400).json({
+          message:
+            "Date must be in YYYY-MM-DD format",
+        });
+      }
+
+      selectedDate = new Date(
+        `${date}T00:00:00`
+      );
+
+      if (Number.isNaN(selectedDate.getTime())) {
+        return res.status(400).json({
+          message: "Invalid date",
+        });
+      }
+
+    } else {
+      selectedDate = now;
+    }
+
+    /*
+    ====================================================
+    DATE INFORMATION
+    ====================================================
+    */
+
+    const year = selectedDate.getFullYear();
+
+    const month =
+      selectedDate.getMonth() + 1;
+
+    const selectedDay =
+      selectedDate.getDate();
+
+    const daysInMonth = new Date(
+      year,
+      month,
+      0
+    ).getDate();
+
+    const selectedDateString =
+      `${year}-${String(month).padStart(
+        2,
+        "0"
+      )}-${String(selectedDay).padStart(
+        2,
+        "0"
+      )}`;
+
+    const startOfMonth =
+      `${year}-${String(month).padStart(
+        2,
+        "0"
+      )}-01`;
+
+    const endOfMonth =
+      `${year}-${String(month).padStart(
+        2,
+        "0"
+      )}-${String(daysInMonth).padStart(
+        2,
+        "0"
+      )}`;
+
+    /*
+    ====================================================
+    GET VEHICLES
+    ====================================================
+    */
+
+    const {
+      data: vehicles,
+      error: vehiclesError,
+    } = await userSupabase
+      .from("vehicles")
+      .select(`
+        id,
+        registration_number,
+        model,
+        category_id,
+
+        drivers (
+          id,
+          name
+        ),
+
+        categories (
+          id,
+          name
+        )
+      `)
+      .order("registration_number", {
+        ascending: true,
+      });
+
+    if (vehiclesError) {
+      console.error(
+        "Error fetching vehicles for monitoring:",
+        vehiclesError
+      );
+
+      return res.status(500).json({
+        message:
+          "Failed to fetch vehicles",
+      });
+    }
+
+    /*
+    ====================================================
+    GET MONTHLY LIMITS
+    ====================================================
+    */
+
+    const {
+      data: monthlyLimits,
+      error: limitsError,
+    } = await userSupabase
+      .from("category_monthly_limits")
+      .select(`
+        category_id,
+        limit_km
+      `)
+      .eq("year", year)
+      .eq("month", month);
+
+    if (limitsError) {
+      console.error(
+        "Error fetching monthly limits:",
+        limitsError
+      );
+
+      return res.status(500).json({
+        message:
+          "Failed to fetch monthly mileage limits",
+      });
+    }
+
+    /*
+    ====================================================
+    CREATE LIMIT LOOKUP
+    ====================================================
+    */
+
+    const limitMap = {};
+
+    (monthlyLimits || []).forEach((limit) => {
+      limitMap[limit.category_id] =
+        Number(limit.limit_km || 0);
+    });
+
+    /*
+    ====================================================
+    GET MILEAGE ENTRIES
+    ====================================================
+
+    We fetch the entire selected month because we need:
+
+    - selected day's mileage
+    - monthly cumulative mileage
+    - trip type statistics
+    */
+
+    const {
+      data: mileageEntries,
+      error: mileageError,
+    } = await userSupabase
+      .from("mileage_entries")
+      .select(`
+        vehicle_id,
+        entry_date,
+        km_covered,
+        trip_type
+      `)
+      .gte(
+        "entry_date",
+        startOfMonth
+      )
+      .lte(
+        "entry_date",
+        endOfMonth
+      );
+
+    if (mileageError) {
+      console.error(
+        "Error fetching mileage entries:",
+        mileageError
+      );
+
+      return res.status(500).json({
+        message:
+          "Failed to fetch mileage entries",
+      });
+    }
+
+    /*
+    ====================================================
+    CREATE VEHICLE MILEAGE MAP
+    ====================================================
+    */
+
+    const mileageMap = {};
+
+    (mileageEntries || []).forEach((entry) => {
+      const vehicleId =
+        entry.vehicle_id;
+
+      if (!mileageMap[vehicleId]) {
+        mileageMap[vehicleId] = {
+          selectedDayKm: 0,
+          monthlyActual: 0,
+
+          selectedDayTrips: {
+            local: 0,
+            outstation: 0,
+          },
+
+          monthlyTrips: {
+            local: 0,
+            outstation: 0,
+          },
+        };
+      }
+
+      const km =
+        Number(entry.km_covered || 0);
+
+      const tripType =
+        entry.trip_type
+          ?.trim()
+          .toLowerCase();
+
+      /*
+      --------------------------------------------------
+      MONTHLY DATA
+      --------------------------------------------------
+
+      For a specific date, we only calculate monthly
+      actual UP TO that selected date.
+
+      Example:
+
+      Selected date = August 15
+
+      Monthly actual =
+      August 1 → August 15
+      */
+
+      const isWithinSelectedPeriod =
+        filter === "month"
+          ? true
+          : entry.entry_date <=
+            selectedDateString;
+
+      if (isWithinSelectedPeriod) {
+        mileageMap[vehicleId].monthlyActual +=
+          km;
+
+        if (tripType === "local") {
+          mileageMap[
+            vehicleId
+          ].monthlyTrips.local += 1;
+        }
+
+        if (tripType === "outstation") {
+          mileageMap[
+            vehicleId
+          ].monthlyTrips.outstation += 1;
+        }
+      }
+
+      /*
+      --------------------------------------------------
+      SELECTED DAY DATA
+      --------------------------------------------------
+      */
+
+      if (
+        entry.entry_date ===
+        selectedDateString
+      ) {
+        mileageMap[
+          vehicleId
+        ].selectedDayKm += km;
+
+        if (tripType === "local") {
+          mileageMap[
+            vehicleId
+          ].selectedDayTrips.local += 1;
+        }
+
+        if (tripType === "outstation") {
+          mileageMap[
+            vehicleId
+          ].selectedDayTrips.outstation += 1;
+        }
+      }
+    });
+
+    /*
+    ====================================================
+    BUILD MONITORING DATA
+    ====================================================
+    */
+
+    const monitoring = (
+      vehicles || []
+    ).map((vehicle) => {
+
+      const monthlyLimit =
+        limitMap[
+          vehicle.category_id
+        ] || 0;
+
+      const mileage =
+        mileageMap[vehicle.id] || {
+          selectedDayKm: 0,
+          monthlyActual: 0,
+
+          selectedDayTrips: {
+            local: 0,
+            outstation: 0,
+          },
+
+          monthlyTrips: {
+            local: 0,
+            outstation: 0,
+          },
+        };
+
+      /*
+      --------------------------------------------------
+      DAILY EXPECTED
+      --------------------------------------------------
+      */
+
+      const dailyExpected =
+        monthlyLimit > 0
+          ? Number(
+              (
+                monthlyLimit /
+                daysInMonth
+              ).toFixed(2)
+            )
+          : 0;
+
+      /*
+      --------------------------------------------------
+      SELECTED DAY DIFFERENCE
+      --------------------------------------------------
+      */
+
+      const selectedDayDifference =
+        Number(
+          (
+            mileage.selectedDayKm -
+            dailyExpected
+          ).toFixed(2)
+        );
+
+      /*
+      --------------------------------------------------
+      MONTHLY EXPECTED
+      --------------------------------------------------
+
+      Today / Selected Date:
+
+      Daily expected × selected day
+
+      Month filter:
+
+      The expected mileage for the full month
+      is the monthly limit.
+      */
+
+      const monthlyExpected =
+        filter === "month"
+          ? monthlyLimit
+          : Number(
+              (
+                dailyExpected *
+                selectedDay
+              ).toFixed(2)
+            );
+
+      /*
+      --------------------------------------------------
+      MONTHLY DIFFERENCE
+      --------------------------------------------------
+      */
+
+      const monthlyDifference =
+        Number(
+          (
+            mileage.monthlyActual -
+            monthlyExpected
+          ).toFixed(2)
+        );
+
+      /*
+      --------------------------------------------------
+      REMAINING MONTHLY KM
+      --------------------------------------------------
+      */
+
+      const remaining =
+        Math.max(
+          monthlyLimit -
+            mileage.monthlyActual,
+          0
+        );
+
+      /*
+      --------------------------------------------------
+      EXCEEDED BY
+      --------------------------------------------------
+      */
+
+      const exceededBy =
+        Math.max(
+          mileage.monthlyActual -
+            monthlyLimit,
+          0
+        );
+
+      /*
+      ==================================================
+      STATUS
+      ==================================================
+
+      RED
+      ----
+
+      Actual monthly mileage has exceeded
+      the actual monthly limit.
+
+
+      ORANGE
+      ------
+
+      Either:
+
+      1. Selected day's mileage is above
+         daily expected
+
+      OR
+
+      2. Monthly mileage is above
+         expected pace.
+
+
+      GREEN
+      -----
+
+      Everything is within expected usage.
+      */
+
+      let status = "on_track";
+
+      if (
+        monthlyLimit > 0 &&
+        mileage.monthlyActual >
+          monthlyLimit
+      ) {
+        status = "exceeded";
+
+      } else if (
+        monthlyLimit > 0 &&
+        (
+          mileage.selectedDayKm >
+            dailyExpected ||
+
+          mileage.monthlyActual >
+            monthlyExpected
+        )
+      ) {
+        status = "warning";
+      }
+
+      /*
+      ==================================================
+      RETURN VEHICLE DATA
+      ==================================================
+      */
+
+      return {
+
+        vehicle: {
+          id: vehicle.id,
+          registration_number:
+            vehicle.registration_number,
+          model: vehicle.model,
+        },
+
+        driver:
+          vehicle.drivers
+            ? {
+                id:
+                  vehicle.drivers.id,
+                name:
+                  vehicle.drivers.name,
+              }
+            : null,
+
+        category:
+          vehicle.categories
+            ? {
+                id:
+                  vehicle.categories.id,
+                name:
+                  vehicle.categories.name,
+              }
+            : null,
+
+        /*
+        Selected day
+        */
+
+        selectedDayKm:
+          Number(
+            mileage.selectedDayKm.toFixed(
+              2
+            )
+          ),
+
+        dailyExpected,
+
+        selectedDayDifference,
+
+        /*
+        Monthly progress
+        */
+
+        monthlyActual:
+          Number(
+            mileage.monthlyActual.toFixed(
+              2
+            )
+          ),
+
+        monthlyExpected,
+
+        monthlyLimit,
+
+        monthlyDifference,
+
+        remaining,
+
+        exceededBy,
+
+        /*
+        Trip counts
+        */
+
+        selectedDayTrips:
+          mileage.selectedDayTrips,
+
+        monthlyTrips:
+          mileage.monthlyTrips,
+
+        status,
+      };
+    });
+
+    /*
+    ====================================================
+    RESPONSE
+    ====================================================
+    */
+
+    return res.status(200).json({
+
+      filter,
+
+      selectedDate:
+        selectedDateString,
+
+      year,
+      month,
+      day:
+        selectedDay,
+
+      daysInMonth,
+
+      monitoring,
+    });
+
+  } catch (error) {
+
+    console.error(
+      "Get mileage monitoring error:",
+      error
+    );
+
+    return res.status(500).json({
+      message:
+        "Server error while fetching mileage monitoring",
+    });
+  }
+};
 /*
 ====================================================
 GET DRIVER'S ASSIGNED VEHICLE
