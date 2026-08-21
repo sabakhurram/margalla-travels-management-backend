@@ -7,6 +7,8 @@ import {
   createMileageEntry,
   getMyMileageHistory,
   getMileageMonitoring,
+    getMonthlyMileageReport,
+      generateMonthlyMileageReportPDF,
 } from "../controllers/mileageController.js";
 import { authenticateUser } from "../middleware/authMiddleware.js";
 
@@ -54,5 +56,16 @@ router.get(
   "/my-history",
   authenticateUser,
   getMyMileageHistory
+);
+// Get monthly mileage report
+router.get(
+  "/monthly-report",
+  authenticateUser,
+  getMonthlyMileageReport
+);
+router.get(
+  "/monthly-report/pdf",
+  authenticateUser,
+  generateMonthlyMileageReportPDF
 );
 export default router;

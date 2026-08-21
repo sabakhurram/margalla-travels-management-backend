@@ -1,5 +1,5 @@
 import { createUserSupabaseClient } from "../config/supabaseUser.js";
-
+import PDFDocument from "pdfkit";
 import { createAuditLog } from "../utils/auditLogger.js";
 export const getMileageEntries = async (req, res) => {
   try {
@@ -1817,5 +1817,1259 @@ return res.status(200).json({
       message:
         "Server error while fetching driver dashboard",
     });
+  }
+};
+
+export const getMonthlyMileageReport = async (req, res) => {
+  try {
+    const userSupabase = createUserSupabaseClient(
+      req.accessToken
+    );
+
+    /*
+    --------------------------------------------
+    Current month
+    --------------------------------------------
+    */
+
+const today = new Date();
+
+const currentYear = today.getFullYear();
+const currentMonth = today.getMonth() + 1;
+
+const requestedYear = Number(req.query.year);
+const requestedMonth = Number(req.query.month);
+
+const year =
+  requestedYear || currentYear;
+
+const month =
+  requestedMonth || currentMonth;
+
+    const daysInMonth = new Date(
+      year,
+      month,
+      0
+    ).getDate();
+const isCurrentMonth =
+  year === currentYear &&
+  month === currentMonth;
+
+const currentDay = isCurrentMonth
+  ? today.getDate()
+  : daysInMonth;
+
+    const startOfMonth =
+      `${year}-${String(month).padStart(2, "0")}-01`;
+
+    const endOfMonth =
+      `${year}-${String(month).padStart(2, "0")}-${String(
+        daysInMonth
+      ).padStart(2, "0")}`;
+
+    /*
+    --------------------------------------------
+    Get vehicles
+    --------------------------------------------
+    */
+
+    const {
+      data: vehicles,
+      error: vehiclesError,
+    } = await userSupabase
+      .from("vehicles")
+      .select(`
+        id,
+        registration_number,
+        model,
+        category_id,
+
+        drivers (
+          id,
+          name
+        ),
+
+        categories (
+          id,
+          name
+        )
+      `)
+      .order("registration_number", {
+        ascending: true,
+      });
+
+    if (vehiclesError) {
+      console.error(
+        "Monthly report vehicles error:",
+        vehiclesError
+      );
+
+      return res.status(500).json({
+        message: "Failed to fetch vehicles",
+      });
+    }
+
+    /*
+    --------------------------------------------
+    Get monthly limits
+    --------------------------------------------
+    */
+
+    const {
+      data: monthlyLimits,
+      error: limitsError,
+    } = await userSupabase
+      .from("category_monthly_limits")
+      .select(`
+        category_id,
+        limit_km
+      `)
+      .eq("year", year)
+      .eq("month", month);
+
+    if (limitsError) {
+      console.error(
+        "Monthly report limits error:",
+        limitsError
+      );
+
+      return res.status(500).json({
+        message: "Failed to fetch monthly limits",
+      });
+    }
+
+    /*
+    --------------------------------------------
+    Create limit lookup
+    --------------------------------------------
+    */
+
+    const limitMap = {};
+
+    (monthlyLimits || []).forEach((limit) => {
+      limitMap[limit.category_id] =
+        Number(limit.limit_km || 0);
+    });
+
+    /*
+    --------------------------------------------
+    Get mileage entries
+    --------------------------------------------
+    */
+
+    const {
+      data: mileageEntries,
+      error: mileageError,
+    } = await userSupabase
+      .from("mileage_entries")
+      .select(`
+        vehicle_id,
+        km_covered,
+        trip_type
+      `)
+      .gte("entry_date", startOfMonth)
+      .lte("entry_date", endOfMonth);
+
+    if (mileageError) {
+      console.error(
+        "Monthly report mileage error:",
+        mileageError
+      );
+
+      return res.status(500).json({
+        message: "Failed to fetch mileage entries",
+      });
+    }
+
+    /*
+    --------------------------------------------
+    Build mileage summary
+    --------------------------------------------
+    */
+
+    const mileageMap = {};
+
+    (mileageEntries || []).forEach((entry) => {
+      const vehicleId = entry.vehicle_id;
+
+      if (!mileageMap[vehicleId]) {
+        mileageMap[vehicleId] = {
+          monthlyActual: 0,
+          localTrips: 0,
+          outstationTrips: 0,
+        };
+      }
+
+      const km = Number(
+        entry.km_covered || 0
+      );
+
+      mileageMap[vehicleId].monthlyActual += km;
+
+      if (entry.trip_type === "local") {
+        mileageMap[vehicleId].localTrips += 1;
+      }
+
+      if (entry.trip_type === "outstation") {
+        mileageMap[vehicleId].outstationTrips += 1;
+      }
+    });
+
+    /*
+    --------------------------------------------
+    Build report
+    --------------------------------------------
+    */
+
+    const report = (vehicles || []).map(
+      (vehicle) => {
+        const monthlyLimit =
+          limitMap[vehicle.category_id] || 0;
+
+        const mileage =
+          mileageMap[vehicle.id] || {
+            monthlyActual: 0,
+            localTrips: 0,
+            outstationTrips: 0,
+          };
+
+        /*
+        Monthly expected mileage
+        based on current day
+        */
+
+        const dailyExpected =
+          monthlyLimit > 0
+            ? monthlyLimit / daysInMonth
+            : 0;
+
+        const monthlyExpected =
+          dailyExpected * currentDay;
+
+        /*
+        Difference from expected pace
+        */
+
+        const difference =
+          mileage.monthlyActual -
+          monthlyExpected;
+
+        /*
+        Remaining monthly limit
+        */
+
+        const remaining =
+          Math.max(
+            monthlyLimit -
+              mileage.monthlyActual,
+            0
+          );
+
+        /*
+        Exceeded amount
+        */
+
+        const exceededBy =
+          Math.max(
+            mileage.monthlyActual -
+              monthlyLimit,
+            0
+          );
+
+        /*
+        Status
+        */
+
+        let status = "on_track";
+
+        if (
+          monthlyLimit > 0 &&
+          mileage.monthlyActual >
+            monthlyLimit
+        ) {
+          status = "exceeded";
+        } else if (
+          monthlyLimit > 0 &&
+          mileage.monthlyActual >
+            monthlyExpected
+        ) {
+          status = "warning";
+        }
+
+        return {
+          vehicle: {
+            id: vehicle.id,
+            registration_number:
+              vehicle.registration_number,
+            model: vehicle.model,
+          },
+
+          driver: vehicle.drivers
+            ? {
+                id: vehicle.drivers.id,
+                name: vehicle.drivers.name,
+              }
+            : null,
+
+          category: vehicle.categories
+            ? {
+                id: vehicle.categories.id,
+                name: vehicle.categories.name,
+              }
+            : null,
+
+          monthlyActual: Number(
+            mileage.monthlyActual.toFixed(2)
+          ),
+
+          monthlyExpected: Number(
+            monthlyExpected.toFixed(2)
+          ),
+
+          monthlyLimit: Number(
+            monthlyLimit.toFixed(2)
+          ),
+
+          difference: Number(
+            difference.toFixed(2)
+          ),
+
+          remaining: Number(
+            remaining.toFixed(2)
+          ),
+
+          exceededBy: Number(
+            exceededBy.toFixed(2)
+          ),
+
+          trips: {
+            local: mileage.localTrips,
+            outstation:
+              mileage.outstationTrips,
+            total:
+              mileage.localTrips +
+              mileage.outstationTrips,
+          },
+
+          status,
+        };
+      }
+    );
+
+    /*
+    --------------------------------------------
+    Overall report totals
+    --------------------------------------------
+    */
+
+    const totalActual = report.reduce(
+      (total, item) =>
+        total + item.monthlyActual,
+      0
+    );
+
+    const totalExpected = report.reduce(
+      (total, item) =>
+        total + item.monthlyExpected,
+      0
+    );
+
+    const totalLimit = report.reduce(
+      (total, item) =>
+        total + item.monthlyLimit,
+      0
+    );
+
+    const totalVehicles = report.length;
+
+    const exceededVehicles = report.filter(
+      (item) =>
+        item.status === "exceeded"
+    ).length;
+
+    const warningVehicles = report.filter(
+      (item) =>
+        item.status === "warning"
+    ).length;
+
+    const onTrackVehicles = report.filter(
+      (item) =>
+        item.status === "on_track"
+    ).length;
+
+    return res.status(200).json({
+      year,
+      month,
+      currentDay,
+      daysInMonth,
+
+      summary: {
+        totalVehicles,
+        totalActual: Number(
+          totalActual.toFixed(2)
+        ),
+        totalExpected: Number(
+          totalExpected.toFixed(2)
+        ),
+        totalLimit: Number(
+          totalLimit.toFixed(2)
+        ),
+        difference: Number(
+          (totalActual - totalExpected).toFixed(2)
+        ),
+        exceededVehicles,
+        warningVehicles,
+        onTrackVehicles,
+      },
+
+      report,
+    });
+
+  } catch (error) {
+    console.error(
+      "Get monthly mileage report error:",
+      error
+    );
+
+    return res.status(500).json({
+      message:
+        "Server error while generating monthly mileage report",
+    });
+  }
+};
+export const generateMonthlyMileageReportPDF = async (req, res) => {
+  try {
+    const userSupabase = createUserSupabaseClient(
+      req.accessToken
+    );
+
+    const year = Number(req.query.year);
+    const month = Number(req.query.month);
+
+    if (!year || !month || month < 1 || month > 12) {
+      return res.status(400).json({
+        message: "Valid year and month are required",
+      });
+    }
+
+    /*
+    --------------------------------------------
+    Date information
+    --------------------------------------------
+    */
+
+    const daysInMonth = new Date(
+      year,
+      month,
+      0
+    ).getDate();
+
+    const currentDate = new Date();
+
+    const isCurrentMonth =
+      year === currentDate.getFullYear() &&
+      month === currentDate.getMonth() + 1;
+
+    const currentDay = isCurrentMonth
+      ? currentDate.getDate()
+      : daysInMonth;
+
+    const startOfMonth =
+      `${year}-${String(month).padStart(2, "0")}-01`;
+
+    const endOfMonth =
+      `${year}-${String(month).padStart(2, "0")}-${String(
+        daysInMonth
+      ).padStart(2, "0")}`;
+
+    /*
+    --------------------------------------------
+    Month name
+    --------------------------------------------
+    */
+
+    const monthName = new Date(
+      year,
+      month - 1,
+      1
+    ).toLocaleString("en-US", {
+      month: "long",
+    });
+
+    /*
+    --------------------------------------------
+    Get vehicles
+    --------------------------------------------
+    */
+
+    const {
+      data: vehicles,
+      error: vehiclesError,
+    } = await userSupabase
+      .from("vehicles")
+      .select(`
+        id,
+        registration_number,
+        model,
+        category_id,
+
+        drivers (
+          id,
+          name
+        ),
+
+        categories (
+          id,
+          name
+        )
+      `)
+      .order("registration_number", {
+        ascending: true,
+      });
+
+    if (vehiclesError) {
+      console.error(
+        "PDF vehicles error:",
+        vehiclesError
+      );
+
+      return res.status(500).json({
+        message: "Failed to fetch vehicles",
+      });
+    }
+
+    /*
+    --------------------------------------------
+    Monthly limits
+    --------------------------------------------
+    */
+
+    const {
+      data: monthlyLimits,
+      error: limitsError,
+    } = await userSupabase
+      .from("category_monthly_limits")
+      .select(`
+        category_id,
+        limit_km
+      `)
+      .eq("year", year)
+      .eq("month", month);
+
+    if (limitsError) {
+      console.error(
+        "PDF monthly limits error:",
+        limitsError
+      );
+
+      return res.status(500).json({
+        message: "Failed to fetch monthly limits",
+      });
+    }
+
+    const limitMap = {};
+
+    (monthlyLimits || []).forEach((limit) => {
+      limitMap[limit.category_id] =
+        Number(limit.limit_km || 0);
+    });
+
+    /*
+    --------------------------------------------
+    Mileage entries
+    --------------------------------------------
+    */
+
+    const {
+      data: mileageEntries,
+      error: mileageError,
+    } = await userSupabase
+      .from("mileage_entries")
+      .select(`
+        vehicle_id,
+        entry_date,
+        km_covered,
+        trip_type
+      `)
+      .gte("entry_date", startOfMonth)
+      .lte("entry_date", endOfMonth);
+
+    if (mileageError) {
+      console.error(
+        "PDF mileage error:",
+        mileageError
+      );
+
+      return res.status(500).json({
+        message: "Failed to fetch mileage",
+      });
+    }
+
+    /*
+    --------------------------------------------
+    Build mileage map
+    --------------------------------------------
+    */
+
+    const mileageMap = {};
+
+    (mileageEntries || []).forEach((entry) => {
+      const vehicleId = entry.vehicle_id;
+
+      if (!mileageMap[vehicleId]) {
+        mileageMap[vehicleId] = {
+          actual: 0,
+          local: 0,
+          outstation: 0,
+        };
+      }
+
+      mileageMap[vehicleId].actual +=
+        Number(entry.km_covered || 0);
+
+      if (entry.trip_type === "local") {
+        mileageMap[vehicleId].local += 1;
+      }
+
+      if (entry.trip_type === "outstation") {
+        mileageMap[vehicleId].outstation += 1;
+      }
+    });
+
+    /*
+    --------------------------------------------
+    Build report
+    --------------------------------------------
+    */
+
+    const report = (vehicles || []).map(
+      (vehicle) => {
+        const monthlyLimit =
+          limitMap[vehicle.category_id] || 0;
+
+        const mileage =
+          mileageMap[vehicle.id] || {
+            actual: 0,
+            local: 0,
+            outstation: 0,
+          };
+
+        const dailyExpected =
+          monthlyLimit > 0
+            ? monthlyLimit / daysInMonth
+            : 0;
+
+        const monthlyExpected =
+          dailyExpected * currentDay;
+
+        const difference =
+          mileage.actual - monthlyExpected;
+
+        const remaining = Math.max(
+          monthlyLimit - mileage.actual,
+          0
+        );
+
+        const exceededBy = Math.max(
+          mileage.actual - monthlyLimit,
+          0
+        );
+
+        let status = "on_track";
+
+        if (
+          monthlyLimit > 0 &&
+          mileage.actual > monthlyLimit
+        ) {
+          status = "exceeded";
+        } else if (
+          monthlyLimit > 0 &&
+          mileage.actual > monthlyExpected
+        ) {
+          status = "warning";
+        }
+
+        return {
+          vehicle,
+          driver: vehicle.drivers || null,
+          category: vehicle.categories || null,
+
+          monthlyActual: Number(
+            mileage.actual.toFixed(2)
+          ),
+
+          monthlyExpected: Number(
+            monthlyExpected.toFixed(2)
+          ),
+
+          monthlyLimit,
+
+          difference: Number(
+            difference.toFixed(2)
+          ),
+
+          remaining,
+
+          exceededBy,
+
+          trips: {
+            local: mileage.local,
+            outstation: mileage.outstation,
+            total:
+              mileage.local +
+              mileage.outstation,
+          },
+
+          status,
+        };
+      }
+    );
+
+    /*
+    --------------------------------------------
+    Summary
+    --------------------------------------------
+    */
+
+    const totalVehicles = report.length;
+
+    const totalActual = report.reduce(
+      (total, item) =>
+        total + item.monthlyActual,
+      0
+    );
+
+    const totalExpected = report.reduce(
+      (total, item) =>
+        total + item.monthlyExpected,
+      0
+    );
+
+    const totalLimit = report.reduce(
+      (total, item) =>
+        total + item.monthlyLimit,
+      0
+    );
+
+    const exceededVehicles =
+      report.filter(
+        (item) => item.status === "exceeded"
+      ).length;
+
+    /*
+    --------------------------------------------
+    PDF response
+    --------------------------------------------
+    */
+
+    const fileName =
+      `Margalla-Travels-Mileage-Report-${monthName}-${year}.pdf`;
+
+    res.setHeader(
+      "Content-Type",
+      "application/pdf"
+    );
+
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${fileName}"`
+    );
+
+    /*
+    --------------------------------------------
+    Create PDF
+    --------------------------------------------
+    */
+
+    const doc = new PDFDocument({
+      size: "A4",
+      margin: 40,
+    });
+
+    doc.pipe(res);
+
+    /*
+    --------------------------------------------
+    Header
+    --------------------------------------------
+    */
+
+    doc
+      .fontSize(20)
+      .fillColor("#17324d")
+      .font("Helvetica-Bold")
+      .text("MARGALLA TRAVELS");
+
+    doc
+      .moveDown(0.3)
+      .fontSize(16)
+      .fillColor("#0797a8")
+      .text("Monthly Mileage Report");
+
+    doc
+      .moveDown(0.3)
+      .fontSize(11)
+      .fillColor("#718096")
+      .font("Helvetica")
+      .text(`${monthName} ${year}`);
+
+    doc.moveDown(1);
+
+    /*
+    --------------------------------------------
+    Summary
+    --------------------------------------------
+    */
+
+    doc
+      .fontSize(13)
+      .fillColor("#17324d")
+      .font("Helvetica-Bold")
+      .text("Report Summary");
+
+    doc.moveDown(0.5);
+
+    doc
+      .fontSize(10)
+      .font("Helvetica")
+      .fillColor("#425466");
+
+    doc.text(
+      `Total Vehicles: ${totalVehicles}`
+    );
+
+    doc.text(
+      `Total Actual KM: ${totalActual.toLocaleString()} km`
+    );
+
+    doc.text(
+      `Total Expected KM: ${totalExpected.toLocaleString()} km`
+    );
+
+    doc.text(
+      `Total Monthly Limit: ${totalLimit.toLocaleString()} km`
+    );
+
+    doc.text(
+      `Exceeded Vehicles: ${exceededVehicles}`
+    );
+
+    doc.moveDown(1);
+
+    /*
+--------------------------------------------
+Vehicle details
+--------------------------------------------
+*/
+
+doc
+  .fontSize(13)
+  .fillColor("#17324d")
+  .font("Helvetica-Bold")
+  .text("Vehicle Mileage Details");
+
+doc.moveDown(0.5);
+
+/*
+--------------------------------------------
+Table configuration
+--------------------------------------------
+*/
+
+const tableLeft = 40;
+const tableWidth = 510;
+
+const headerHeight = 24;
+const rowHeight = 32;
+
+const pageBottom = 780;
+const footerSpace = 35;
+const rowBottomLimit = pageBottom - footerSpace;
+
+/*
+--------------------------------------------
+Table columns
+--------------------------------------------
+*/
+
+const columns = [
+  {
+    title: "Vehicle",
+    x: 40,
+    width: 75,
+  },
+  {
+    title: "Driver",
+    x: 115,
+    width: 65,
+  },
+  {
+    title: "Actual",
+    x: 180,
+    width: 55,
+  },
+  {
+    title: "Expected",
+    x: 235,
+    width: 60,
+  },
+  {
+    title: "Limit",
+    x: 295,
+    width: 55,
+  },
+  {
+    title: "Diff.",
+    x: 350,
+    width: 55,
+  },
+  {
+    title: "Trips",
+    x: 405,
+    width: 45,
+  },
+  {
+    title: "Status",
+    x: 450,
+    width: 100,
+  },
+];
+
+/*
+--------------------------------------------
+Draw table header
+--------------------------------------------
+*/
+
+const drawTableHeader = () => {
+  const headerY = doc.y;
+
+  doc
+    .rect(
+      tableLeft,
+      headerY - 4,
+      tableWidth,
+      headerHeight
+    )
+    .fill("#f1f6f8");
+
+  columns.forEach((column) => {
+    doc
+      .fontSize(8)
+      .fillColor("#526174")
+      .font("Helvetica-Bold")
+      .text(
+        column.title,
+        column.x + 4,
+        headerY + 3,
+        {
+          width: column.width - 8,
+        }
+      );
+  });
+
+  return headerY + headerHeight + 3;
+};
+
+/*
+--------------------------------------------
+Initial table header
+--------------------------------------------
+*/
+
+let rowY = drawTableHeader();
+
+/*
+--------------------------------------------
+Table rows
+--------------------------------------------
+*/
+
+report.forEach((item, index) => {
+
+  /*
+  ------------------------------------------
+  Check if next row fits on current page
+  ------------------------------------------
+  */
+
+  if (rowY + rowHeight > rowBottomLimit) {
+
+    /*
+    Add new page
+    */
+
+    doc.addPage();
+
+    /*
+    Reset position
+    */
+
+    doc.y = 50;
+
+    /*
+    Draw table header again
+    */
+
+    rowY = drawTableHeader();
+
+  }
+
+
+  /*
+  ------------------------------------------
+  Alternate row background
+  ------------------------------------------
+  */
+
+  if (index % 2 === 0) {
+
+    doc
+      .rect(
+        tableLeft,
+        rowY - 4,
+        tableWidth,
+        rowHeight
+      )
+      .fill("#fafcfd");
+
+  }
+
+
+  /*
+  ------------------------------------------
+  Vehicle
+  ------------------------------------------
+  */
+
+  const vehicleName =
+    item.vehicle?.registration_number ||
+    "—";
+
+
+  /*
+  ------------------------------------------
+  Driver
+  ------------------------------------------
+  */
+
+  const driverName =
+    item.driver?.name ||
+    "Unassigned";
+
+
+  /*
+  ------------------------------------------
+  Status
+  ------------------------------------------
+  */
+
+  const statusLabel =
+    item.status === "exceeded"
+      ? "Exceeded"
+      : item.status === "warning"
+      ? "Warning"
+      : "On Track";
+
+
+  const statusColor =
+    item.status === "exceeded"
+      ? "#c53030"
+      : item.status === "warning"
+      ? "#c05621"
+      : "#078a76";
+
+
+  /*
+  ------------------------------------------
+  Base text styling
+  ------------------------------------------
+  */
+
+  doc
+    .fontSize(8)
+    .font("Helvetica")
+    .fillColor("#425466");
+
+
+  /*
+  ------------------------------------------
+  Vehicle
+  ------------------------------------------
+  */
+
+  doc.text(
+    vehicleName,
+    44,
+    rowY,
+    {
+      width: 67,
+    }
+  );
+
+
+  /*
+  ------------------------------------------
+  Driver
+  ------------------------------------------
+  */
+
+  doc.text(
+    driverName,
+    119,
+    rowY,
+    {
+      width: 57,
+    }
+  );
+
+
+  /*
+  ------------------------------------------
+  Actual
+  ------------------------------------------
+  */
+
+  doc.text(
+    `${item.monthlyActual}`,
+    184,
+    rowY,
+    {
+      width: 47,
+    }
+  );
+
+
+  /*
+  ------------------------------------------
+  Expected
+  ------------------------------------------
+  */
+
+  doc.text(
+    `${item.monthlyExpected}`,
+    239,
+    rowY,
+    {
+      width: 52,
+    }
+  );
+
+
+  /*
+  ------------------------------------------
+  Limit
+  ------------------------------------------
+  */
+
+  doc.text(
+    `${item.monthlyLimit}`,
+    299,
+    rowY,
+    {
+      width: 47,
+    }
+  );
+
+
+  /*
+  ------------------------------------------
+  Difference
+  ------------------------------------------
+  */
+
+  doc.text(
+    `${
+      item.difference > 0
+        ? "+"
+        : ""
+    }${item.difference}`,
+    354,
+    rowY,
+    {
+      width: 47,
+    }
+  );
+
+
+  /*
+  ------------------------------------------
+  Trips
+  ------------------------------------------
+  */
+
+  doc.text(
+    `${item.trips.total}`,
+    409,
+    rowY,
+    {
+      width: 37,
+    }
+  );
+
+
+  /*
+  ------------------------------------------
+  Status
+  ------------------------------------------
+  */
+
+  doc
+    .fillColor(statusColor)
+    .font("Helvetica-Bold")
+    .text(
+      statusLabel,
+      454,
+      rowY,
+      {
+        width: 92,
+      }
+    );
+
+
+  /*
+  ------------------------------------------
+  Move to next row
+  ------------------------------------------
+  */
+
+  rowY += rowHeight;
+
+});
+
+    /*
+    --------------------------------------------
+    Footer
+    --------------------------------------------
+    */
+
+    doc
+      .fontSize(8)
+      .font("Helvetica")
+      .fillColor("#8793a2")
+      .text(
+        `Generated by Margalla Travels Management System • ${new Date().toLocaleDateString()}`,
+        40,
+        780,
+        {
+          align: "center",
+          width: 510,
+        }
+      );
+
+    doc.end();
+
+  } catch (error) {
+    console.error(
+      "Generate mileage PDF error:",
+      error
+    );
+
+    if (!res.headersSent) {
+      return res.status(500).json({
+        message:
+          "Failed to generate mileage report",
+      });
+    }
   }
 };
