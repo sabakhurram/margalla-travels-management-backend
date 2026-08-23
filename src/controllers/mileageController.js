@@ -621,10 +621,10 @@ export const getMileageMonitoring = async (req, res) => {
     ====================================================
     */
 
-    const monitoring = (
-      vehicles || []
-    ).map((vehicle) => {
-
+  const monitoring = (
+  vehicles || []
+)
+  .map((vehicle) => {
       const monthlyLimit =
         limitMap[
           vehicle.category_id
@@ -877,9 +877,15 @@ export const getMileageMonitoring = async (req, res) => {
           mileage.monthlyTrips,
 
         status,
-      };
-    });
+    };
+  })
+  .filter((item) => {
+    if (filter === "month") {
+      return true;
+    }
 
+    return item.selectedDayKm > 0;
+  });
     /*
     ====================================================
     RESPONSE

@@ -6,6 +6,7 @@ import categoryRoutes from "./routes/categoryRoutes.js";
 import driverRoutes from "./routes/driverRoute.js";
 import mileageRoutes from "./routes/mileageRoutes.js";
 import auditLogRoutes from "./routes/auditLogRoutes.js";
+import dashboardRoutes from "./routes/dashboardRoutes.js";
 
 const app = express();
 
@@ -18,6 +19,10 @@ app.use("/api/categories", categoryRoutes);
 app.use("/api/drivers", driverRoutes);
 app.use("/api/mileage", mileageRoutes);
 app.use("/api/audit-logs", auditLogRoutes);
+app.use(
+  "/api/dashboard",
+  dashboardRoutes
+);
 app.get("/", (req, res) => {
   res.json({
     message: "Margalla Travels API is running",
