@@ -4,6 +4,11 @@ import { createAuditLog } from "../utils/auditLogger.js";
 export const getVehicles = async (req, res) => {
   try {
     const userSupabase = createUserSupabaseClient(req.accessToken);
+    /*
+--------------------------------------------
+Ensure driver is assigned to only one vehicle
+--------------------------------------------
+*/
 
     const { data, error } = await userSupabase
       .from("vehicles")
@@ -106,7 +111,32 @@ export const createVehicle = async (req, res) => {
         message: "Vehicle with this registration number already exists",
       });
     }
+// Check if driver is already assigned to another vehicle
+if (assigned_driver_id) {
+  const { data: assignedVehicle, error: assignedVehicleError } =
+    await userSupabase
+      .from("vehicles")
+      .select("id, registration_number")
+      .eq("assigned_driver_id", assigned_driver_id)
+      .maybeSingle();
 
+  if (assignedVehicleError) {
+    console.error(
+      "Error checking driver assignment:",
+      assignedVehicleError
+    );
+
+    return res.status(500).json({
+      message: "Failed to check driver assignment",
+    });
+  }
+
+  if (assignedVehicle) {
+    return res.status(400).json({
+      message: `This driver is already assigned to vehicle ${assignedVehicle.registration_number}`,
+    });
+  }
+}
     const { data, error } = await userSupabase
       .from("vehicles")
       .insert([
@@ -275,7 +305,33 @@ if (!oldVehicle) {
         message: "Registration number already exists",
       });
     }
+/*
+--------------------------------------------
+Ensure driver is assigned to only one vehicle
+--------------------------------------------
+*/
 
+if (assigned_driver_id) {
+  const { error: unassignError } = await userSupabase
+    .from("vehicles")
+    .update({
+      assigned_driver_id: null,
+    })
+    .eq("assigned_driver_id", assigned_driver_id)
+    .neq("id", id);
+
+  if (unassignError) {
+    console.error(
+      "Error removing driver from previous vehicle:",
+      unassignError
+    );
+
+    return res.status(500).json({
+      message:
+        "Failed to update driver vehicle assignment",
+    });
+  }
+}
     const { data, error } = await userSupabase
       .from("vehicles")
       .update({
@@ -306,19 +362,15 @@ if (!oldVehicle) {
         message: "Failed to update vehicle",
       });
     }
-await createAuditLog(
-  
-  {
+await createAuditLog({
   supabase: userSupabase,
   userId: req.user.id,
   action: "UPDATE",
   tableName: "vehicles",
   recordId: data.id,
-  oldValue: null,
+  oldValue: oldVehicle,
   newValue: data,
-
-  }
-);
+});
     res.status(200).json({
       message: "Vehicle updated successfully",
       vehicle: data,

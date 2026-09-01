@@ -384,93 +384,206 @@ export const getDashboardOverview = async (req, res) => {
       );
 
     /*
-    ====================================================
-    VEHICLES UNDER MAINTENANCE
-    ====================================================
-    */
+ 
+  /*
+====================================================
+DAILY MILEAGE LIMIT
+====================================================
 
-    const maintenanceVehicles =
-      (vehicles || []).filter(
-        (vehicle) =>
-          vehicle.status ===
-          "maintenance"
-      );
+Daily limit is calculated from the
+monthly category limit.
 
-    /*
-    ====================================================
-    MILEAGE EXCEEDED
-    ====================================================
-    */
+Example:
+Monthly limit = 2500 km
+Days in month = 31
 
-    const exceededVehicles =
-      mileageUtilization.filter(
-        (item) =>
-          item.monthlyLimit > 0 &&
-          item.monthlyActual >
-            item.monthlyLimit
-      );
+Daily limit = 2500 / 31
+            = 80.65 km
+====================================================
+*/
 
-    /*
-    ====================================================
+const dailyExceededVehicles =
+  (vehicles || [])
+    .map((vehicle) => {
+      const monthlyLimit =
+        limitMap[vehicle.category_id] || 0;
+
+      const mileage =
+        mileageMap[vehicle.id] || {
+          actual: 0,
+          today: 0,
+          local: 0,
+          outstation: 0,
+        };
+
+      const dailyLimit =
+        monthlyLimit > 0
+          ? monthlyLimit / daysInMonth
+          : 0;
+
+      return {
+        id: vehicle.id,
+        registration_number:
+          vehicle.registration_number,
+        model: vehicle.model,
+
+        todayKm: Number(
+          mileage.today.toFixed(2)
+        ),
+
+        dailyLimit: Number(
+          dailyLimit.toFixed(2)
+        ),
+
+        monthlyLimit,
+      };
+    })
+    .filter(
+      (vehicle) =>
+        vehicle.dailyLimit > 0 &&
+        vehicle.todayKm >
+          vehicle.dailyLimit
+    );
+
+
+/*
+====================================================
+MONTHLY MILEAGE LIMIT EXCEEDED
+====================================================
+*/
+
+/*
+====================================================
+MONTHLY MILEAGE EXCEEDED
+====================================================
+*/
+
+const exceededVehicles =
+  mileageUtilization.filter(
+    (item) =>
+      item.monthlyLimit > 0 &&
+      item.monthlyActual >
+        item.monthlyLimit
+  );
+
+const exceededVehicleIds =
+  exceededVehicles.map(
+    (item) => item.vehicle.id
+  );
+   /* ====================================================
     ALERTS
     ====================================================
     */
 
-    const alerts = [];
+ /*
+====================================================
+ALERTS
+====================================================
+*/
 
-    if (
-      missingMileageDrivers.length >
-      0
-    ) {
-      alerts.push({
-        id: "missing-mileage",
-        type: "critical",
-        count:
-          missingMileageDrivers.length,
-        title:
-          "Drivers missing mileage",
-        description:
-          "Today's mileage has not been submitted.",
-        action:
-          "Review drivers",
-      });
-    }
+const alerts = [];
 
-    if (
-      maintenanceVehicles.length >
-      0
-    ) {
-      alerts.push({
-        id: "maintenance",
-        type: "warning",
-        count:
-          maintenanceVehicles.length,
-        title:
-          "Vehicles under maintenance",
-        description:
-          "These vehicles are currently unavailable.",
-        action:
-          "View vehicles",
-      });
-    }
 
-    if (
-      exceededVehicles.length >
-      0
-    ) {
-      alerts.push({
-        id: "mileage-exceeded",
-        type: "critical",
-        count:
-          exceededVehicles.length,
-        title:
-          "Mileage limit exceeded",
-        description:
-          "Vehicles have exceeded their monthly mileage limit.",
-        action:
-          "Review mileage",
-      });
-    }
+/*
+====================================================
+1. DRIVERS MISSING TODAY'S MILEAGE
+====================================================
+*/
+
+if (
+  missingMileageDrivers.length > 0
+) {
+  alerts.push({
+    id: "missing-mileage",
+
+    type: "missing-mileage",
+
+    count:
+      missingMileageDrivers.length,
+
+    title:
+      "Drivers Missing Mileage",
+
+    description:
+      "These drivers have not submitted today's mileage.",
+
+    action:
+      "View Drivers",
+
+    driverIds:
+      missingMileageDrivers.map(
+        (driver) => driver.id
+      ),
+  });
+}
+
+
+/*
+====================================================
+2. DAILY MILEAGE LIMIT EXCEEDED
+====================================================
+*/
+
+if (
+  dailyExceededVehicles.length > 0
+) {
+  alerts.push({
+    id: "daily-limit",
+
+    type: "daily-limit",
+
+    count:
+      dailyExceededVehicles.length,
+
+    title:
+      "Daily Limit Exceeded",
+
+    description:
+      "These vehicles have exceeded their allowed mileage for today.",
+
+    action:
+      "View Mileage",
+
+    vehicleIds:
+      dailyExceededVehicles.map(
+        (vehicle) => vehicle.id
+      ),
+  });
+}
+
+
+/*
+====================================================
+3. MONTHLY MILEAGE LIMIT EXCEEDED
+====================================================
+*/
+
+if (
+  exceededVehicles.length > 0
+) {
+  alerts.push({
+    id: "monthly-limit",
+
+    type: "monthly-limit",
+
+    count:
+      exceededVehicles.length,
+
+    title:
+      "Monthly Limit Exceeded",
+
+    description:
+      "These vehicles have exceeded their monthly mileage limit.",
+
+    action:
+      "View Vehicles",
+
+    vehicleIds:
+      exceededVehicles.map(
+        (item) => item.vehicle.id
+      ),
+  });
+}
 
     /*
     ====================================================

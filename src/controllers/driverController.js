@@ -1,6 +1,8 @@
 import { createUserSupabaseClient } from "../config/supabaseUser.js";
 import { supabaseAdmin } from "../config/supabaseAdmin.js";
 import { createAuditLog } from "../utils/auditLogger.js";
+import { buildSyntheticEmail, generateTempPassword } from "../utils/authHelpers.js";
+
 export const getDrivers = async (req, res) => {
   try {
     const userSupabase = createUserSupabaseClient(req.accessToken);
@@ -12,6 +14,7 @@ export const getDrivers = async (req, res) => {
         user_id,
         name,
         phone,
+        username,
         status,
         created_at,
         vehicles (
@@ -42,23 +45,15 @@ export const getDrivers = async (req, res) => {
   }
 };
 
-
 export const createDriver = async (req, res) => {
- 
   let createdAuthUserId = null;
 
   try {
-    const {
-      name,
-      phone,
-      email,
-      status,
-    } = req.body;
+    const { name, phone, username, status } = req.body;
 
     // -----------------------------
     // Validate input
     // -----------------------------
-
     if (!name || !name.trim()) {
       return res.status(400).json({
         message: "Driver name is required",
@@ -71,9 +66,9 @@ export const createDriver = async (req, res) => {
       });
     }
 
-    if (!email || !email.trim()) {
+    if (!username || !username.trim()) {
       return res.status(400).json({
-        message: "Driver email is required",
+        message: "Driver username is required",
       });
     }
 
@@ -83,25 +78,28 @@ export const createDriver = async (req, res) => {
       });
     }
 
-    const normalizedEmail = email.trim().toLowerCase();
+    const normalizedUsername = username.trim().toLowerCase();
+    const syntheticEmail = buildSyntheticEmail(normalizedUsername);
+    const tempPassword = generateTempPassword();
 
     // -----------------------------
-    // Create Supabase Auth user
+    // Create Supabase Auth user directly
+    // (no invite email sent — account is active immediately)
     // -----------------------------
-
-   const {
-  data: authData,
-  error: authError,
-} = await supabaseAdmin.auth.admin.inviteUserByEmail(
-  normalizedEmail,
-  {
-    redirectTo: "http://localhost:5173/set-password",
-    data: {
-      name: name.trim(),
-      role: "driver",
-    },
-  }
-);
+    const {
+      data: authData,
+      error: authError,
+    } = await supabaseAdmin.auth.admin.createUser({
+      email: syntheticEmail,
+      password: tempPassword,
+      email_confirm: true, // skips confirmation step entirely
+      user_metadata: {
+        name: name.trim(),
+        role: "driver",
+        username: normalizedUsername,
+        must_reset_password: true,
+      },
+    });
 
     if (authError) {
       console.error(
@@ -117,6 +115,31 @@ export const createDriver = async (req, res) => {
     }
 
     createdAuthUserId = authData.user.id;
+
+    // -----------------------------
+    // Create/update the profiles row
+    // (this is what login looks up — required)
+    // -----------------------------
+    const { error: profileError } = await supabaseAdmin
+      .from("profiles")
+      .upsert({
+        id: createdAuthUserId,
+        name: name.trim(),
+        role: "driver",
+        username: normalizedUsername,
+        is_active: true,
+      });
+
+    if (profileError) {
+      console.error("Error creating profile:", profileError);
+
+      await supabaseAdmin.auth.admin.deleteUser(createdAuthUserId);
+      createdAuthUserId = null;
+
+      return res.status(500).json({
+        message: "Failed to create driver profile",
+      });
+    }
 
     // -----------------------------
     // Create driver database record
@@ -136,6 +159,7 @@ export const createDriver = async (req, res) => {
           user_id: createdAuthUserId,
           name: name.trim(),
           phone: phone.trim(),
+          username: normalizedUsername,
           status: status.trim(),
         },
       ])
@@ -144,6 +168,7 @@ export const createDriver = async (req, res) => {
         user_id,
         name,
         phone,
+        username,
         status,
         created_at,
         vehicles (
@@ -179,35 +204,21 @@ export const createDriver = async (req, res) => {
     // -----------------------------
     // Success
     // -----------------------------
-    if (error) {
-  console.error(
-    "Error creating driver record:",
-    error
-  );
 
-  await supabaseAdmin.auth.admin.deleteUser(
-    createdAuthUserId
-  );
+    await createAuditLog({
+      supabase: userSupabase,
+      userId: req.user.id,
+      action: "CREATE",
+      tableName: "drivers",
+      recordId: data.id,
+      oldValue: null,
+      newValue: data,
+    });
 
-  createdAuthUserId = null;
-
-  return res.status(500).json({
-    message: "Failed to create driver",
-  });
-}
-await createAuditLog({
-  supabase: userSupabase,
-  userId: req.user.id,
-  action: "CREATE",
-  tableName: "drivers",
-  recordId: data.id,
-  oldValue: null,
-  newValue: data,
-});
     return res.status(201).json({
-      message:
-        "Driver created successfully. An invitation email has been sent.",
+      message: "Driver created successfully.",
       driver: data,
+      tempPassword, // shown once in the UI, never stored in plaintext anywhere else
     });
   } catch (error) {
     console.error(
@@ -232,6 +243,88 @@ await createAuditLog({
     return res.status(500).json({
       message:
         "Server error while creating driver",
+    });
+  }
+};
+
+export const resetDriverPassword = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!id) {
+      return res.status(400).json({
+        message: "Driver ID is required",
+      });
+    }
+
+    const userSupabase = createUserSupabaseClient(
+      req.accessToken
+    );
+
+    const {
+      data: driver,
+      error: driverError,
+    } = await userSupabase
+      .from("drivers")
+      .select("id, user_id, name, status")
+      .eq("id", id)
+      .maybeSingle();
+
+    if (driverError) {
+      console.error("Error fetching driver:", driverError);
+      return res.status(500).json({
+        message: "Failed to fetch driver",
+      });
+    }
+
+    if (!driver) {
+      return res.status(404).json({
+        message: "Driver not found",
+      });
+    }
+
+    if (!driver.user_id) {
+      return res.status(400).json({
+        message:
+          "This driver does not have a linked authentication account",
+      });
+    }
+
+    const newTempPassword = generateTempPassword();
+
+    const { error: updateError } =
+      await supabaseAdmin.auth.admin.updateUserById(
+        driver.user_id,
+        {
+          password: newTempPassword,
+          user_metadata: { must_reset_password: true },
+        }
+      );
+
+    if (updateError) {
+      console.error(
+        "Error resetting driver password:",
+        updateError
+      );
+
+      return res.status(500).json({
+        message: "Failed to reset password",
+      });
+    }
+
+    return res.status(200).json({
+      message: "Password reset successfully.",
+      tempPassword: newTempPassword,
+    });
+  } catch (error) {
+    console.error(
+      "Reset driver password error:",
+      error
+    );
+
+    return res.status(500).json({
+      message:
+        "Server error while resetting password",
     });
   }
 };
@@ -273,38 +366,40 @@ export const updateDriver = async (req, res) => {
     const userSupabase = createUserSupabaseClient(
       req.accessToken
     );
-const {
-  data: oldDriver,
-  error: fetchError,
-} = await userSupabase
-  .from("drivers")
-  .select(`
-    id,
-    user_id,
-    name,
-    phone,
-    status,
-    created_at
-  `)
-  .eq("id", id)
-  .maybeSingle();
 
-if (fetchError) {
-  console.error(
-    "Error fetching driver before update:",
-    fetchError
-  );
+    const {
+      data: oldDriver,
+      error: fetchError,
+    } = await userSupabase
+      .from("drivers")
+      .select(`
+        id,
+        user_id,
+        name,
+        phone,
+        status,
+        created_at
+      `)
+      .eq("id", id)
+      .maybeSingle();
 
-  return res.status(500).json({
-    message: "Failed to fetch driver",
-  });
-}
+    if (fetchError) {
+      console.error(
+        "Error fetching driver before update:",
+        fetchError
+      );
 
-if (!oldDriver) {
-  return res.status(404).json({
-    message: "Driver not found",
-  });
-}
+      return res.status(500).json({
+        message: "Failed to fetch driver",
+      });
+    }
+
+    if (!oldDriver) {
+      return res.status(404).json({
+        message: "Driver not found",
+      });
+    }
+
     const { data, error } = await userSupabase
       .from("drivers")
       .update({
@@ -318,6 +413,7 @@ if (!oldDriver) {
         user_id,
         name,
         phone,
+        username,
         status,
         created_at,
         vehicles (
@@ -335,15 +431,34 @@ if (!oldDriver) {
         message: "Failed to update driver",
       });
     }
-await createAuditLog({
-  supabase: userSupabase,
-  userId: req.user.id,
-  action: "UPDATE",
-  tableName: "drivers",
-  recordId: id,
-  oldValue: oldDriver,
-  newValue: data,
-});
+
+    // Keep the profiles table's name in sync too,
+    // since it's a separate copy used for login/role lookups.
+    if (oldDriver.user_id) {
+      const { error: profileUpdateError } = await supabaseAdmin
+        .from("profiles")
+        .update({ name: name.trim() })
+        .eq("id", oldDriver.user_id);
+
+      if (profileUpdateError) {
+        console.error(
+          "Error syncing profile name:",
+          profileUpdateError
+        );
+        // Not fatal — driver record already updated successfully.
+      }
+    }
+
+    await createAuditLog({
+      supabase: userSupabase,
+      userId: req.user.id,
+      action: "UPDATE",
+      tableName: "drivers",
+      recordId: id,
+      oldValue: oldDriver,
+      newValue: data,
+    });
+
     res.status(200).json({
       message: "Driver updated successfully",
       driver: data,
@@ -356,7 +471,6 @@ await createAuditLog({
     });
   }
 };
-
 
 export const deleteDriver = async (req, res) => {
   try {
@@ -448,6 +562,21 @@ export const deleteDriver = async (req, res) => {
       });
     }
 
+    // Also remove the linked Auth account and profile,
+    // otherwise it's left as an orphaned login with no driver record.
+    if (oldDriver.user_id) {
+      try {
+        await supabaseAdmin.auth.admin.deleteUser(oldDriver.user_id);
+      } catch (authDeleteError) {
+        console.error(
+          "Failed to delete linked Auth account:",
+          authDeleteError
+        );
+        // Not fatal — driver record is already deleted.
+        // The orphaned Auth/profile row should be cleaned up manually if this happens.
+      }
+    }
+
     // Create audit log
     await createAuditLog({
       supabase: userSupabase,
@@ -471,5 +600,4 @@ export const deleteDriver = async (req, res) => {
       message: "Server error while deleting driver",
     });
   }
-}
-
+};
