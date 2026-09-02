@@ -32,7 +32,68 @@ console.log("Profile error:", profileError);
     if (!profile || !profile.email) {
       return res.status(401).json({ message: "Invalid username or password" });
     }
+// Check whether the driver account is active
+if (profile.role === "driver") {
+  const { data: driver, error: driverError } =
+    await supabaseAdmin
+      .from("drivers")
+      .select("id, status")
+      .eq("user_id", profile.id)
+      .maybeSingle();
 
+  if (driverError) {
+    console.error(
+      "Error checking driver status:",
+      driverError
+    );
+
+    return res.status(500).json({
+      message: "Server error during login",
+    });
+  }
+
+  if (!driver) {
+    return res.status(403).json({
+      message: "Driver account not found",
+    });
+  }
+
+  if (driver.status !== "active") {
+    return res.status(403).json({
+      message:
+        "Your driver account is inactive. Please contact the administrator.",
+    });
+  }
+}
+if (profile.role === "driver") {
+  const { data: driver, error: driverError } =
+    await supabaseAdmin
+      .from("drivers")
+      .select("status")
+      .eq("user_id", profile.id)
+      .maybeSingle();
+
+  if (driverError) {
+    console.error("Error checking driver status:", driverError);
+
+    return res.status(500).json({
+      message: "Server error during login",
+    });
+  }
+
+  if (!driver) {
+    return res.status(403).json({
+      message: "Driver account not found",
+    });
+  }
+
+  if (driver.status !== "active") {
+    return res.status(403).json({
+      message:
+        "Your account is inactive. Please contact your administrator.",
+    });
+  }
+}
     // Use the ACTUAL stored email — never recompute it.
     // This works correctly whether the account uses a real
     // email (admins) or a synthetic one (drivers).

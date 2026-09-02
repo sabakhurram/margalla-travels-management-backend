@@ -118,3 +118,142 @@ export const createAdmin = async (req, res) => {
     return res.status(500).json({ message: "Server error while creating account" });
   }
 };
+export const resetAdminPassword = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { data: admin, error: adminError } = await supabaseAdmin
+      .from("profiles")
+      .select("id, name, role")
+      .eq("id", id)
+      .eq("role", "admin")
+      .single();
+
+    if (adminError || !admin) {
+      return res.status(404).json({
+        message: "Admin not found",
+      });
+    }
+
+    const tempPassword = generateTempPassword();
+
+    const { data: authData, error: authError } =
+      await supabaseAdmin.auth.admin.getUserById(id);
+
+    if (authError || !authData.user) {
+      return res.status(404).json({
+        message: "Admin authentication account not found",
+      });
+    }
+
+    const existingMetadata =
+      authData.user.user_metadata || {};
+
+    const { error: updateError } =
+      await supabaseAdmin.auth.admin.updateUserById(id, {
+        password: tempPassword,
+        user_metadata: {
+          ...existingMetadata,
+          must_reset_password: true,
+        },
+      });
+
+    if (updateError) {
+      console.error(
+        "Reset admin password error:",
+        updateError
+      );
+
+      return res.status(500).json({
+        message: "Failed to reset admin password",
+      });
+    }
+
+    return res.status(200).json({
+      message: "Password reset successfully",
+      tempPassword,
+      adminName: admin.name,
+    });
+
+  } catch (error) {
+    console.error(
+      "Reset admin password error:",
+      error
+    );
+
+    return res.status(500).json({
+      message: "Server error while resetting password",
+    });
+  }
+};
+export const deleteAdmin = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Prevent an admin from deleting themselves
+    if (req.user.id === id) {
+      return res.status(400).json({
+        message: "You cannot delete your own admin account",
+      });
+    }
+
+    // Check that this is actually an admin
+    const { data: admin, error: adminError } =
+      await supabaseAdmin
+        .from("profiles")
+        .select("id, name, role")
+        .eq("id", id)
+        .eq("role", "admin")
+        .single();
+
+    if (adminError || !admin) {
+      return res.status(404).json({
+        message: "Admin not found",
+      });
+    }
+
+    // Delete Supabase Auth user
+    const { error: deleteAuthError } =
+      await supabaseAdmin.auth.admin.deleteUser(id);
+
+    if (deleteAuthError) {
+      console.error(
+        "Error deleting admin Auth user:",
+        deleteAuthError
+      );
+
+      return res.status(500).json({
+        message: "Failed to delete admin account",
+      });
+    }
+
+    // Delete profile
+    const { error: deleteProfileError } =
+      await supabaseAdmin
+        .from("profiles")
+        .delete()
+        .eq("id", id);
+
+    if (deleteProfileError) {
+      console.error(
+        "Error deleting admin profile:",
+        deleteProfileError
+      );
+
+      return res.status(500).json({
+        message: "Admin authentication account was deleted, but profile deletion failed",
+      });
+    }
+
+    return res.status(200).json({
+      message: "Admin deleted successfully",
+    });
+
+  } catch (error) {
+    console.error("Delete admin error:", error);
+
+    return res.status(500).json({
+      message: "Server error while deleting admin",
+    });
+  }
+};

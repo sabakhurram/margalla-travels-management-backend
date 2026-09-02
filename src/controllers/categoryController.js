@@ -315,44 +315,46 @@ export const deleteCategory = async (req, res) => {
       });
     }
 
-    const userSupabase = createUserSupabaseClient(req.accessToken);
-    const { data: oldCategory, error: oldCategoryError } =
-  await userSupabase
-    .from("categories")
-    .select(`
-      id,
-      name,
-      created_at
-    `)
-    .eq("id", id)
-    .maybeSingle();
+    const userSupabase = createUserSupabaseClient(
+      req.accessToken
+    );
 
-if (oldCategoryError) {
-  console.error(
-    "Error fetching category:",
-    oldCategoryError
-  );
+    // -----------------------------------
+    // Get category before deletion
+    // -----------------------------------
+    const {
+      data: oldCategory,
+      error: oldCategoryError,
+    } = await userSupabase
+      .from("categories")
+      .select(`
+        id,
+        name,
+        created_at
+      `)
+      .eq("id", id)
+      .maybeSingle();
 
-  return res.status(500).json({
-    message: "Failed to fetch category",
-  });
-}
+    if (oldCategoryError) {
+      console.error(
+        "Error fetching category:",
+        oldCategoryError
+      );
 
-if (!oldCategory) {
-  return res.status(404).json({
-    message: "Category not found",
-  });
-}
-await createAuditLog({
-  userSupabase,
-  userId: req.user.id,
-  action: "DELETE",
-  tableName: "categories",
-  recordId: oldCategory.id,
-  oldValue: oldCategory,
-  newValue: null,
-});
+      return res.status(500).json({
+        message: "Failed to fetch category",
+      });
+    }
 
+    if (!oldCategory) {
+      return res.status(404).json({
+        message: "Category not found",
+      });
+    }
+
+    // -----------------------------------
+    // Delete category
+    // -----------------------------------
     const { data, error } = await userSupabase
       .from("categories")
       .delete()
@@ -362,6 +364,14 @@ await createAuditLog({
 
     if (error) {
       console.error("Error deleting category:", error);
+
+      // Foreign key constraint
+      if (error.code === "23503") {
+        return res.status(409).json({
+          message:
+            "Cannot delete this category because it has related vehicles or records.",
+        });
+      }
 
       return res.status(500).json({
         message: "Failed to delete category",
@@ -374,14 +384,28 @@ await createAuditLog({
       });
     }
 
-    res.status(200).json({
+    // -----------------------------------
+    // Create audit log AFTER successful deletion
+    // -----------------------------------
+    await createAuditLog({
+      supabase: userSupabase,
+      userId: req.user.id,
+      action: "DELETE",
+      tableName: "categories",
+      recordId: oldCategory.id,
+      oldValue: oldCategory,
+      newValue: null,
+    });
+
+    return res.status(200).json({
       message: "Category deleted successfully",
       categoryId: data.id,
     });
+
   } catch (error) {
     console.error("Delete category error:", error);
 
-    res.status(500).json({
+    return res.status(500).json({
       message: "Server error while deleting category",
     });
   }

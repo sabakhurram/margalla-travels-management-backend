@@ -396,38 +396,42 @@ export const deleteVehicle = async (req, res) => {
     const userSupabase = createUserSupabaseClient(
       req.accessToken
     );
-const {
-  data: vehicleToDelete,
-  error: fetchError,
-} = await userSupabase
-  .from("vehicles")
-  .select(`
-    id,
-    registration_number,
-    model,
-    category_id,
-    assigned_driver_id,
-    status
-  `)
-  .eq("id", id)
-  .maybeSingle();
 
-if (fetchError) {
-  console.error(
-    "Error fetching vehicle before deletion:",
-    fetchError
-  );
+    // Get vehicle before deletion
+    const {
+      data: vehicleToDelete,
+      error: fetchError,
+    } = await userSupabase
+      .from("vehicles")
+      .select(`
+        id,
+        registration_number,
+        model,
+        category_id,
+        assigned_driver_id,
+        status
+      `)
+      .eq("id", id)
+      .maybeSingle();
 
-  return res.status(500).json({
-    message: "Failed to fetch vehicle",
-  });
-}
+    if (fetchError) {
+      console.error(
+        "Error fetching vehicle before deletion:",
+        fetchError
+      );
 
-if (!vehicleToDelete) {
-  return res.status(404).json({
-    message: "Vehicle not found",
-  });
-}
+      return res.status(500).json({
+        message: "Failed to fetch vehicle",
+      });
+    }
+
+    if (!vehicleToDelete) {
+      return res.status(404).json({
+        message: "Vehicle not found",
+      });
+    }
+
+    // Delete vehicle
     const { data, error } = await userSupabase
       .from("vehicles")
       .delete()
@@ -437,6 +441,14 @@ if (!vehicleToDelete) {
 
     if (error) {
       console.error("Error deleting vehicle:", error);
+
+      // Foreign key constraint error
+      if (error.code === "23503") {
+        return res.status(409).json({
+          message:
+            "Cannot delete this vehicle because it has related mileage records.",
+        });
+      }
 
       return res.status(500).json({
         message: "Failed to delete vehicle",
@@ -449,23 +461,26 @@ if (!vehicleToDelete) {
       });
     }
 
-await createAuditLog({
-  supabase: userSupabase,
-  userId: req.user.id,
-  action: "DELETE",
-  tableName: "vehicles",
-  recordId: id,
-  oldValue: vehicleToDelete,
-  newValue: null,
-});
-    res.status(200).json({
+    // Create audit log
+    await createAuditLog({
+      supabase: userSupabase,
+      userId: req.user.id,
+      action: "DELETE",
+      tableName: "vehicles",
+      recordId: id,
+      oldValue: vehicleToDelete,
+      newValue: null,
+    });
+
+    return res.status(200).json({
       message: "Vehicle deleted successfully",
       vehicleId: data.id,
     });
+
   } catch (error) {
     console.error("Delete vehicle error:", error);
 
-    res.status(500).json({
+    return res.status(500).json({
       message: "Server error while deleting vehicle",
     });
   }

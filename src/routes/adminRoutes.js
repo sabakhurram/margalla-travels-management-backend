@@ -3,6 +3,8 @@ import express from "express";
 import {
   createAdmin,
   getAdmins,
+  resetAdminPassword,
+  deleteAdmin,
 } from "../controllers/adminController.js";
 
 import { authenticateUser } from "../middleware/authMiddleware.js";
@@ -25,5 +27,19 @@ router.post(
   requireAdmin,
   createAdmin
 );
+// Reset admin password
+router.put(
+  "/:id/reset-password",
+  authenticateUser,
+  requireAdmin,
+  resetAdminPassword
+);
 
+// Delete admin
+router.delete(
+  "/:id",
+  authenticateUser,
+  requireAdmin,
+  deleteAdmin
+);
 export default router;

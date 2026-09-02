@@ -120,15 +120,16 @@ export const createDriver = async (req, res) => {
     // Create/update the profiles row
     // (this is what login looks up — required)
     // -----------------------------
-    const { error: profileError } = await supabaseAdmin
-      .from("profiles")
-      .upsert({
-        id: createdAuthUserId,
-        name: name.trim(),
-        role: "driver",
-        username: normalizedUsername,
-        is_active: true,
-      });
+   const { error: profileError } = await supabaseAdmin
+  .from("profiles")
+  .upsert({
+    id: createdAuthUserId,
+    name: name.trim(),
+    email: syntheticEmail,
+    role: "driver",
+    username: normalizedUsername,
+    is_active: true,
+  });
 
     if (profileError) {
       console.error("Error creating profile:", profileError);
@@ -486,13 +487,17 @@ export const deleteDriver = async (req, res) => {
       req.accessToken
     );
 
+    // -----------------------------------
     // Check whether the driver has a vehicle assigned
-    const { data: assignedVehicle, error: vehicleError } =
-      await userSupabase
-        .from("vehicles")
-        .select("id")
-        .eq("assigned_driver_id", id)
-        .maybeSingle();
+    // -----------------------------------
+    const {
+      data: assignedVehicle,
+      error: vehicleError,
+    } = await userSupabase
+      .from("vehicles")
+      .select("id")
+      .eq("assigned_driver_id", id)
+      .maybeSingle();
 
     if (vehicleError) {
       console.error(
@@ -508,11 +513,13 @@ export const deleteDriver = async (req, res) => {
     if (assignedVehicle) {
       return res.status(409).json({
         message:
-          "Cannot delete driver while a vehicle is assigned to them",
+          "Cannot delete this driver because a vehicle is assigned to them.",
       });
     }
 
-    // Get the driver before deleting
+    // -----------------------------------
+    // Get driver before deletion
+    // -----------------------------------
     const {
       data: oldDriver,
       error: fetchError,
@@ -546,7 +553,9 @@ export const deleteDriver = async (req, res) => {
       });
     }
 
-    // Delete the driver
+    // -----------------------------------
+    // Delete driver
+    // -----------------------------------
     const { data, error } = await userSupabase
       .from("drivers")
       .delete()
@@ -557,27 +566,41 @@ export const deleteDriver = async (req, res) => {
     if (error) {
       console.error("Error deleting driver:", error);
 
+      // Foreign key constraint
+      if (error.code === "23503") {
+        return res.status(409).json({
+          message:
+            "Cannot delete this driver because they have related records or mileage history.",
+        });
+      }
+
       return res.status(500).json({
         message: "Failed to delete driver",
       });
     }
 
-    // Also remove the linked Auth account and profile,
-    // otherwise it's left as an orphaned login with no driver record.
+    // -----------------------------------
+    // Delete linked Supabase Auth account
+    // -----------------------------------
     if (oldDriver.user_id) {
       try {
-        await supabaseAdmin.auth.admin.deleteUser(oldDriver.user_id);
+        await supabaseAdmin.auth.admin.deleteUser(
+          oldDriver.user_id
+        );
       } catch (authDeleteError) {
         console.error(
           "Failed to delete linked Auth account:",
           authDeleteError
         );
-        // Not fatal — driver record is already deleted.
-        // The orphaned Auth/profile row should be cleaned up manually if this happens.
+
+        // Driver record was deleted successfully,
+        // so we only log the Auth deletion failure.
       }
     }
 
-    // Create audit log
+    // -----------------------------------
+    // Create audit log AFTER successful deletion
+    // -----------------------------------
     await createAuditLog({
       supabase: userSupabase,
       userId: req.user.id,
@@ -588,7 +611,7 @@ export const deleteDriver = async (req, res) => {
       newValue: null,
     });
 
-    res.status(200).json({
+    return res.status(200).json({
       message: "Driver deleted successfully",
       driverId: data.id,
     });
@@ -596,7 +619,7 @@ export const deleteDriver = async (req, res) => {
   } catch (error) {
     console.error("Delete driver error:", error);
 
-    res.status(500).json({
+    return res.status(500).json({
       message: "Server error while deleting driver",
     });
   }
