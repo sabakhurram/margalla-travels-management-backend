@@ -510,6 +510,48 @@ export const getMileageMonitoring = async (req, res) => {
           "Failed to fetch mileage entries",
       });
     }
+    /*
+====================================================
+GET COMPLETED OUTSTATION TRIPS
+====================================================
+
+Outstation trips are stored separately from
+mileage_entries, so we fetch them separately.
+
+Only completed trips count toward mileage usage.
+*/
+
+const {
+  data: outstationTrips,
+  error: outstationMileageError,
+} = await userSupabase
+  .from("outstation_trips")
+  .select(`
+    vehicle_id,
+    entry_date,
+    km_covered
+  `)
+  .eq("status", "completed")
+  .gte(
+    "entry_date",
+    startOfMonth
+  )
+  .lte(
+    "entry_date",
+    endOfMonth
+  );
+
+if (outstationMileageError) {
+  console.error(
+    "Error fetching outstation mileage:",
+    outstationMileageError
+  );
+
+  return res.status(500).json({
+    message:
+      "Failed to fetch outstation mileage",
+  });
+}
 
     /*
     ====================================================
@@ -614,7 +656,83 @@ export const getMileageMonitoring = async (req, res) => {
         }
       }
     });
+/*
+====================================================
+ADD COMPLETED OUTSTATION TRIPS
+====================================================
 
+Outstation trips are stored in outstation_trips,
+but monitoring should treat their completed
+kilometers as mileage usage.
+
+They are always counted as outstation trips.
+*/
+
+(outstationTrips || []).forEach((trip) => {
+  const vehicleId =
+    trip.vehicle_id;
+
+  if (!mileageMap[vehicleId]) {
+    mileageMap[vehicleId] = {
+      selectedDayKm: 0,
+      monthlyActual: 0,
+
+      selectedDayTrips: {
+        local: 0,
+        outstation: 0,
+      },
+
+      monthlyTrips: {
+        local: 0,
+        outstation: 0,
+      },
+    };
+  }
+
+  const km =
+    Number(trip.km_covered || 0);
+
+  /*
+  --------------------------------------------------
+  MONTHLY DATA
+  --------------------------------------------------
+  */
+
+  const isWithinSelectedPeriod =
+    filter === "month"
+      ? true
+      : trip.entry_date <=
+        selectedDateString;
+
+  if (isWithinSelectedPeriod) {
+    mileageMap[
+      vehicleId
+    ].monthlyActual += km;
+
+    mileageMap[
+      vehicleId
+    ].monthlyTrips.outstation += 1;
+  }
+
+  /*
+  --------------------------------------------------
+  SELECTED DAY DATA
+  --------------------------------------------------
+  */
+
+  if (
+    trip.entry_date ===
+    selectedDateString
+  ) {
+    mileageMap[
+      vehicleId
+    ].selectedDayKm += km;
+
+    mileageMap[
+      vehicleId
+    ].selectedDayTrips.outstation += 1;
+  }
+});
     /*
     ====================================================
     BUILD MONITORING DATA
@@ -1338,6 +1456,12 @@ Check previous mileage entry
 --------------------------------------------
 */
 
+/*
+--------------------------------------------
+Get latest mileage entry
+--------------------------------------------
+*/
+
 const {
   data: previousEntry,
   error: previousEntryError,
@@ -1346,8 +1470,8 @@ const {
   .select(`
     id,
     entry_date,
-    starting_mileage,
-    ending_mileage
+    ending_mileage,
+    created_at
   `)
   .eq("vehicle_id", vehicle.id)
   .order("entry_date", { ascending: false })
@@ -1355,6 +1479,134 @@ const {
   .limit(1)
   .maybeSingle();
 
+if (previousEntryError) {
+  console.error(
+    "Error fetching previous mileage entry:",
+    previousEntryError
+  );
+
+  return res.status(500).json({
+    message:
+      "Failed to validate previous mileage",
+  });
+}
+
+/*
+--------------------------------------------
+Get latest completed outstation trip
+--------------------------------------------
+*/
+
+const {
+  data: previousOutstation,
+  error: previousOutstationError,
+} = await userSupabase
+  .from("outstation_trips")
+  .select(`
+    id,
+    entry_date,
+    ending_mileage,
+    completed_at,
+    created_at
+  `)
+  .eq("vehicle_id", vehicle.id)
+  .eq("status", "completed")
+  .not("ending_mileage", "is", null)
+  .order("entry_date", { ascending: false })
+  .order("created_at", { ascending: false })
+  .limit(1)
+  .maybeSingle();
+
+if (previousOutstationError) {
+  console.error(
+    "Error fetching previous outstation trip:",
+    previousOutstationError
+  );
+
+  return res.status(500).json({
+    message:
+      "Failed to validate previous outstation mileage",
+  });
+}
+
+/*
+--------------------------------------------
+Determine latest odometer
+--------------------------------------------
+*/
+
+let latestPreviousRecord = null;
+
+if (
+  previousEntry &&
+  previousOutstation
+) {
+  const mileageDate = new Date(
+    `${previousEntry.entry_date}T00:00:00`
+  );
+
+  const outstationDate = new Date(
+    `${previousOutstation.entry_date}T00:00:00`
+  );
+
+  if (outstationDate > mileageDate) {
+    latestPreviousRecord = {
+      source: "outstation",
+      ending_mileage:
+        previousOutstation.ending_mileage,
+    };
+  } else if (mileageDate > outstationDate) {
+    latestPreviousRecord = {
+      source: "mileage",
+      ending_mileage:
+        previousEntry.ending_mileage,
+    };
+  } else {
+    /*
+    Same date.
+    Compare creation time.
+    */
+
+    const mileageCreated =
+      new Date(
+        previousEntry.created_at
+      );
+
+    const outstationCreated =
+      new Date(
+        previousOutstation.created_at
+      );
+
+    if (
+      outstationCreated >
+      mileageCreated
+    ) {
+      latestPreviousRecord = {
+        source: "outstation",
+        ending_mileage:
+          previousOutstation.ending_mileage,
+      };
+    } else {
+      latestPreviousRecord = {
+        source: "mileage",
+        ending_mileage:
+          previousEntry.ending_mileage,
+      };
+    }
+  }
+} else if (previousEntry) {
+  latestPreviousRecord = {
+    source: "mileage",
+    ending_mileage:
+      previousEntry.ending_mileage,
+  };
+} else if (previousOutstation) {
+  latestPreviousRecord = {
+    source: "outstation",
+    ending_mileage:
+      previousOutstation.ending_mileage,
+  };
+}
 if (previousEntryError) {
   console.error(
     "Error fetching previous mileage entry:",
@@ -1409,13 +1661,24 @@ than previous ending mileage
 --------------------------------------------
 */
 
+/*
+--------------------------------------------
+Starting mileage must not be lower than
+the latest ending mileage from either
+local or outstation trips
+--------------------------------------------
+*/
+
 if (
-  previousEntry &&
-  startMileage < Number(previousEntry.ending_mileage)
+  latestPreviousRecord &&
+  startMileage <
+    Number(
+      latestPreviousRecord.ending_mileage
+    )
 ) {
   return res.status(400).json({
     message:
-      `Starting mileage cannot be less than the previous ending mileage (${previousEntry.ending_mileage} KM)`,
+      `Starting mileage cannot be less than the previous ending mileage (${latestPreviousRecord.ending_mileage} KM)`,
   });
 }
     /*
@@ -1725,7 +1988,55 @@ console.log("Monthly limit query result:", {
           "Failed to calculate monthly mileage",
       });
     }
-    const {
+    /*
+--------------------------------------------
+Get this month's completed outstation trips
+for the assigned vehicle
+--------------------------------------------
+*/
+
+const {
+  data: outstationTrips,
+  error: outstationMileageError,
+} = await userSupabase
+  .from("outstation_trips")
+  .select(`
+    id,
+    entry_date,
+    km_covered,
+    status
+  `)
+  .eq("vehicle_id", vehicle.id)
+  .eq("status", "completed")
+  .gte("entry_date", startOfMonth)
+  .lte("entry_date", endOfMonth);
+
+if (outstationMileageError) {
+  console.error(
+    "Error fetching monthly outstation mileage:",
+    outstationMileageError
+  );
+
+  return res.status(500).json({
+    message:
+      "Failed to calculate monthly outstation mileage",
+  });
+}
+   /*
+====================================================
+GET LATEST ODOMETER FROM BOTH SOURCES
+====================================================
+
+The driver's latest odometer can come from:
+
+1. mileage_entries
+2. completed outstation_trips
+
+We compare both and use the most recent
+completed trip.
+*/
+
+const {
   data: latestMileageEntry,
   error: latestMileageError,
 } = await userSupabase
@@ -1733,8 +2044,8 @@ console.log("Monthly limit query result:", {
   .select(`
     id,
     entry_date,
-    starting_mileage,
-    ending_mileage
+    ending_mileage,
+    created_at
   `)
   .eq("vehicle_id", vehicle.id)
   .order("entry_date", { ascending: false })
@@ -1754,24 +2065,204 @@ if (latestMileageError) {
   });
 }
 
+/*
+--------------------------------------------
+Get latest completed outstation trip
+--------------------------------------------
+*/
+
+const {
+  data: latestOutstationTrip,
+  error: latestOutstationError,
+} = await userSupabase
+  .from("outstation_trips")
+  .select(`
+    id,
+    entry_date,
+    ending_mileage,
+    completed_at,
+    created_at
+  `)
+  .eq("vehicle_id", vehicle.id)
+  .eq("status", "completed")
+  .not("ending_mileage", "is", null)
+  .order("entry_date", { ascending: false })
+  .order("created_at", { ascending: false })
+  .limit(1)
+  .maybeSingle();
+
+if (latestOutstationError) {
+  console.error(
+    "Error fetching latest outstation trip:",
+    latestOutstationError
+  );
+
+  return res.status(500).json({
+    message:
+      "Failed to fetch latest outstation trip",
+  });
+}
+
+/*
+--------------------------------------------
+Determine latest record
+--------------------------------------------
+*/
+
+let latestOdometerRecord = null;
+
+if (
+  latestMileageEntry &&
+  latestOutstationTrip
+) {
+  const mileageDate = new Date(
+    `${latestMileageEntry.entry_date}T00:00:00`
+  );
+
+  const outstationDate = new Date(
+    `${latestOutstationTrip.entry_date}T00:00:00`
+  );
+
+  if (outstationDate > mileageDate) {
+    latestOdometerRecord = {
+      source: "outstation",
+      ending_mileage:
+        latestOutstationTrip.ending_mileage,
+      entry_date:
+        latestOutstationTrip.entry_date,
+      created_at:
+        latestOutstationTrip.created_at,
+    };
+  } else if (mileageDate > outstationDate) {
+    latestOdometerRecord = {
+      source: "mileage",
+      ending_mileage:
+        latestMileageEntry.ending_mileage,
+      entry_date:
+        latestMileageEntry.entry_date,
+      created_at:
+        latestMileageEntry.created_at,
+    };
+  } else {
+    /*
+    Same date:
+    compare creation time.
+    */
+
+    const mileageCreated =
+      new Date(
+        latestMileageEntry.created_at
+      );
+
+    const outstationCreated =
+      new Date(
+        latestOutstationTrip.created_at
+      );
+
+    if (
+      outstationCreated >
+      mileageCreated
+    ) {
+      latestOdometerRecord = {
+        source: "outstation",
+        ending_mileage:
+          latestOutstationTrip.ending_mileage,
+        entry_date:
+          latestOutstationTrip.entry_date,
+        created_at:
+          latestOutstationTrip.created_at,
+      };
+    } else {
+      latestOdometerRecord = {
+        source: "mileage",
+        ending_mileage:
+          latestMileageEntry.ending_mileage,
+        entry_date:
+          latestMileageEntry.entry_date,
+        created_at:
+          latestMileageEntry.created_at,
+      };
+    }
+  }
+} else if (latestMileageEntry) {
+  latestOdometerRecord = {
+    source: "mileage",
+    ending_mileage:
+      latestMileageEntry.ending_mileage,
+    entry_date:
+      latestMileageEntry.entry_date,
+    created_at:
+      latestMileageEntry.created_at,
+  };
+} else if (latestOutstationTrip) {
+  latestOdometerRecord = {
+    source: "outstation",
+    ending_mileage:
+      latestOutstationTrip.ending_mileage,
+    entry_date:
+      latestOutstationTrip.entry_date,
+    created_at:
+      latestOutstationTrip.created_at,
+  };
+}
+
 const startingOdometer =
-  latestMileageEntry
-    ? Number(latestMileageEntry.ending_mileage)
+  latestOdometerRecord
+    ? Number(
+        latestOdometerRecord.ending_mileage
+      )
     : null;
 
-    console.log("Starting odometer:", startingOdometer);
-console.log("Latest mileage entry:", latestMileageEntry);
+console.log(
+  "Starting odometer:",
+  startingOdometer
+);
+
+console.log(
+  "Latest odometer record:",
+  latestOdometerRecord
+);
     /*
     --------------------------------------------
     Calculate used mileage
     --------------------------------------------
     */
 
-    const used = (mileageEntries || []).reduce(
-      (total, entry) =>
-        total + Number(entry.km_covered || 0),
-      0
-    );
+   /*
+--------------------------------------------
+Calculate total used mileage
+--------------------------------------------
+
+Includes:
+
+1. Local mileage entries
+2. Completed outstation trips
+*/
+
+const localMileage = (
+  mileageEntries || []
+).reduce(
+  (total, entry) =>
+    total + Number(entry.km_covered || 0),
+  0
+);
+
+const outstationMileage = (
+  outstationTrips || []
+).reduce(
+  (total, trip) =>
+    total + Number(trip.km_covered || 0),
+  0
+);
+
+const used =
+  localMileage + outstationMileage;
+
+console.log("Monthly mileage breakdown:", {
+  localMileage,
+  outstationMileage,
+  totalUsed: used,
+});
 
     /*
     --------------------------------------------
@@ -1986,6 +2477,49 @@ const currentDay = isCurrentMonth
         message: "Failed to fetch mileage entries",
       });
     }
+    /*
+
+    /*
+--------------------------------------------
+Get completed outstation trips
+--------------------------------------------
+
+Outstation trips are stored separately from
+mileage_entries.
+
+Only completed trips count in the monthly report.
+*/
+
+const {
+  data: outstationTrips,
+  error: outstationMileageError,
+} = await userSupabase
+  .from("outstation_trips")
+  .select(`
+    vehicle_id,
+    km_covered
+  `)
+  .eq("status", "completed")
+  .gte(
+    "entry_date",
+    startOfMonth
+  )
+  .lte(
+    "entry_date",
+    endOfMonth
+  );
+
+if (outstationMileageError) {
+  console.error(
+    "Monthly report outstation mileage error:",
+    outstationMileageError
+  );
+
+  return res.status(500).json({
+    message:
+      "Failed to fetch outstation mileage",
+  });
+}
 
     /*
     --------------------------------------------
@@ -2020,7 +2554,35 @@ const currentDay = isCurrentMonth
         mileageMap[vehicleId].outstationTrips += 1;
       }
     });
+/*
+--------------------------------------------
+Add completed outstation trips
+--------------------------------------------
 
+These trips are stored in outstation_trips,
+so add their kilometers and trip count
+to the same vehicle summary.
+*/
+
+(outstationTrips || []).forEach((trip) => {
+  const vehicleId = trip.vehicle_id;
+
+  if (!mileageMap[vehicleId]) {
+    mileageMap[vehicleId] = {
+      monthlyActual: 0,
+      localTrips: 0,
+      outstationTrips: 0,
+    };
+  }
+
+  const km = Number(
+    trip.km_covered || 0
+  );
+
+  mileageMap[vehicleId].monthlyActual += km;
+
+  mileageMap[vehicleId].outstationTrips += 1;
+});
     /*
     --------------------------------------------
     Build report
@@ -2410,6 +2972,36 @@ export const generateMonthlyMileageReportPDF = async (req, res) => {
         message: "Failed to fetch mileage",
       });
     }
+    const {
+  data: outstationTrips,
+  error: outstationMileageError,
+} = await userSupabase
+  .from("outstation_trips")
+  .select(`
+    vehicle_id,
+    km_covered
+  `)
+  .eq("status", "completed")
+  .gte(
+    "entry_date",
+    startOfMonth
+  )
+  .lte(
+    "entry_date",
+    endOfMonth
+  );
+
+if (outstationMileageError) {
+  console.error(
+    "PDF outstation mileage error:",
+    outstationMileageError
+  );
+
+  return res.status(500).json({
+    message:
+      "Failed to fetch outstation mileage",
+  });
+}
 
     /*
     --------------------------------------------
@@ -2441,7 +3033,22 @@ export const generateMonthlyMileageReportPDF = async (req, res) => {
         mileageMap[vehicleId].outstation += 1;
       }
     });
+(outstationTrips || []).forEach((trip) => {
+  const vehicleId = trip.vehicle_id;
 
+  if (!mileageMap[vehicleId]) {
+    mileageMap[vehicleId] = {
+      actual: 0,
+      local: 0,
+      outstation: 0,
+    };
+  }
+
+  mileageMap[vehicleId].actual +=
+    Number(trip.km_covered || 0);
+
+  mileageMap[vehicleId].outstation += 1;
+});
     /*
     --------------------------------------------
     Build report

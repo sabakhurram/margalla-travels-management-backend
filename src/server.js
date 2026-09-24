@@ -9,6 +9,7 @@ import auditLogRoutes from "./routes/auditLogRoutes.js";
 import dashboardRoutes from "./routes/dashboardRoutes.js";
 import adminRoutes from "./routes/adminRoutes.js";
 import authRoutes from "./routes/authRoutes.js";
+import outstationRoutes from "./routes/outstationRoutes.js";
 
 const app = express();
 
@@ -19,6 +20,7 @@ app.use("/api/vehicles", vehicleRoutes);
 app.use("/api/categories", categoryRoutes);
 app.use("/api/drivers", driverRoutes);
 app.use("/api/mileage", mileageRoutes);
+app.use("/api/outstation", outstationRoutes);
 app.use("/api/audit-logs", auditLogRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/auth", authRoutes);

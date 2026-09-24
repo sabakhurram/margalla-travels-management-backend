@@ -184,7 +184,45 @@ export const getDashboardOverview = async (req, res) => {
           "Failed to fetch dashboard mileage",
       });
     }
+/*
+====================================================
+GET COMPLETED OUTSTATION TRIPS
+====================================================
+*/
 
+const {
+  data: outstationTrips,
+  error: outstationError,
+} = await userSupabase
+  .from("outstation_trips")
+  .select(`
+    id,
+    driver_id,
+    vehicle_id,
+    entry_date,
+    km_covered,
+    destination,
+    completed_at,
+    created_at
+  `)
+  .eq("status", "completed")
+  .gte("entry_date", startOfMonth)
+  .lte("entry_date", endOfMonth)
+  .order("created_at", {
+    ascending: false,
+  });
+
+if (outstationError) {
+  console.error(
+    "Dashboard outstation trips error:",
+    outstationError
+  );
+
+  return res.status(500).json({
+    message:
+      "Failed to fetch dashboard outstation trips",
+  });
+}
     /*
     ====================================================
     KPI — VEHICLE COUNTS
@@ -249,20 +287,44 @@ export const getDashboardOverview = async (req, res) => {
         mileageMap[vehicleId].outstation += 1;
       }
     });
+(outstationTrips || []).forEach((trip) => {
+  const vehicleId = trip.vehicle_id;
 
+  if (!mileageMap[vehicleId]) {
+    mileageMap[vehicleId] = {
+      actual: 0,
+      today: 0,
+      local: 0,
+      outstation: 0,
+    };
+  }
+
+  const km = Number(trip.km_covered || 0);
+
+  mileageMap[vehicleId].actual += km;
+
+  if (trip.entry_date === todayString) {
+    mileageMap[vehicleId].today += km;
+  }
+
+  mileageMap[vehicleId].outstation += 1;
+});
     /*
     ====================================================
     KPI — TOTAL MONTHLY KM
     ====================================================
     */
-
-    const monthlyKm =
-      (mileageEntries || []).reduce(
-        (total, entry) =>
-          total +
-          Number(entry.km_covered || 0),
-        0
-      );
+const monthlyKm =
+  (mileageEntries || []).reduce(
+    (total, entry) =>
+      total + Number(entry.km_covered || 0),
+    0
+  ) +
+  (outstationTrips || []).reduce(
+    (total, trip) =>
+      total + Number(trip.km_covered || 0),
+    0
+  );
 
     /*
     ====================================================
@@ -608,62 +670,100 @@ if (
     Audit logs can be added here next.
     */
 
-    const recentActivity =
-      (mileageEntries || [])
-        .slice(0, 5)
-        .map((entry) => {
-          const vehicle =
-            vehicles?.find(
-              (item) =>
-                item.id ===
-                entry.vehicle_id
-            );
+  const mileageActivities =
+  (mileageEntries || []).map((entry) => {
+    const vehicle = vehicles?.find(
+      (item) => item.id === entry.vehicle_id
+    );
 
-          const driver =
-            drivers?.find(
-              (item) =>
-                item.id ===
-                entry.driver_id
-            );
+    const driver = drivers?.find(
+      (item) => item.id === entry.driver_id
+    );
 
-          return {
-            id: entry.id,
+    return {
+      id: `mileage-${entry.id}`,
+      type: "mileage",
+      title: "Mileage Entry Submitted",
+      description:
+        `${driver?.name || "Driver"} submitted ${Number(
+          entry.km_covered || 0
+        )} km for ${
+          vehicle?.model ||
+          vehicle?.registration_number ||
+          "vehicle"
+        }`,
+      date: entry.entry_date,
+      createdAt: entry.created_at,
 
-            type: "mileage",
+      vehicle: vehicle
+        ? {
+            id: vehicle.id,
+            registration_number:
+              vehicle.registration_number,
+            model: vehicle.model,
+          }
+        : null,
 
-            title:
-              "Mileage Entry Submitted",
+      driver: driver
+        ? {
+            id: driver.id,
+            name: driver.name,
+          }
+        : null,
+    };
+  });
 
-            description:
-              `${driver?.name || "Driver"} submitted ${Number(entry.km_covered || 0)} km for ${vehicle?.model || vehicle?.registration_number || "vehicle"}`,
+const outstationActivities =
+  (outstationTrips || []).map((trip) => {
+    const vehicle = vehicles?.find(
+      (item) => item.id === trip.vehicle_id
+    );
 
-            date:
-              entry.entry_date,
+    const driver = drivers?.find(
+      (item) => item.id === trip.driver_id
+    );
 
-            createdAt:
-              entry.created_at,
+    return {
+      id: `outstation-${trip.id}`,
+      type: "outstation",
+      title: "Outstation Trip Completed",
+      description:
+        `${driver?.name || "Driver"} completed ${Number(
+          trip.km_covered || 0
+        )} km outstation trip to ${
+          trip.destination || "destination"
+        }`,
+      date: trip.entry_date,
+      createdAt: trip.completed_at || trip.created_at,
 
-            vehicle:
-              vehicle
-                ? {
-                    id: vehicle.id,
-                    registration_number:
-                      vehicle.registration_number,
-                    model:
-                      vehicle.model,
-                  }
-                : null,
+      vehicle: vehicle
+        ? {
+            id: vehicle.id,
+            registration_number:
+              vehicle.registration_number,
+            model: vehicle.model,
+          }
+        : null,
 
-            driver:
-              driver
-                ? {
-                    id: driver.id,
-                    name:
-                      driver.name,
-                  }
-                : null,
-          };
-        });
+      driver: driver
+        ? {
+            id: driver.id,
+            name: driver.name,
+          }
+        : null,
+    };
+  });
+
+const recentActivity = [
+  ...mileageActivities,
+  ...outstationActivities,
+]
+  .sort(
+    (a, b) =>
+      new Date(b.createdAt) -
+      new Date(a.createdAt)
+  )
+  .slice(0, 5);
 
     /*
     ====================================================
